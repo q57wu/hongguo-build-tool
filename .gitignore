@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Build / Distribution
+build/
+dist/
+*.spec
+*.exe
+
+# Frontend build & deps
+frontend/dist/
+frontend/node_modules/
+
+# Output / Data
+output/
+*.xlsx
+
+# Logs
+*.log
+stdout.log
+stderr.log
+
+# Runtime / Config (user-specific)
+config.json
+config-*.json
+config_backups/
+build_records.json
+material_history.json
+judan_cache.txt
+.app.pid
+
+# Data directories (user data)
+数据/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Scripts (deployment-specific)
+_restart.ps1
+_check_proc.ps1
+
+# Documentation (internal)
+docs/

@@ -1,0 +1,23 @@
+{
+  "version": "2026-05",
+  "updated": "2026-05-02",
+  "description": "巨量引擎素材库页面选择器",
+  "material_page": {
+    "search_input": "input[placeholder='请输入视频名称/ID']",
+    "search_button_primary": "span.i-icon-search.filter-search-input-icon",
+    "search_button_fallback1": ".filter-search-input-icon",
+    "search_button_fallback2": ".ovui-input__suffix .i-icon-search",
+    "search_button_fallback3": ".ovui-input__suffix",
+    "video_card_row_primary": "tbody tr",
+    "video_card_row_fallback": ".ovui-table-row",
+    "video_name": ".video-name-content",
+    "video_cost": "td.ovui-table-cell--right",
+    "video_id": ".video-id",
+    "next_page": "li.ovui-page-turner__item:has(.ovui-page-turner__next-icon)",
+    "next_page_disabled_class": "ovui-page-turner__item--disabled",
+    "page_active": "li.ovui-page-turner__item--active",
+    "loading_indicator_primary": ".video-name-content",
+    "loading_indicator_fallback1": "tbody tr",
+    "loading_indicator_fallback2": ".ovui-table-row"
+  }
+}
