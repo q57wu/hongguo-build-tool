@@ -32,6 +32,15 @@ async function callApi(method, ...args) {
   return await window.pywebview.api[method](...args)
 }
 
+// 带自动错误解包的调用封装：若响应为 {ok: false, error} 则自动 throw
+export async function callApiSafe(method, ...args) {
+  const result = await callApi(method, ...args)
+  if (result && typeof result === 'object' && result.ok === false) {
+    throw new Error(result.error || '操作失败')
+  }
+  return result
+}
+
 // ═══ 配置管理 ═══
 export async function getConfig() {
   const res = await callApi('get_config')
@@ -69,6 +78,10 @@ export async function checkBrowser() {
 
 export async function launchBrowser() {
   return callApi('launch_browser')
+}
+
+export async function dumpPageStructure() {
+  return callApi('dump_page_structure')
 }
 
 // ═══ 搭建控制 ═══
@@ -202,5 +215,72 @@ export async function rtaCheck(dramaType, aadvids) {
 
 export async function stopRtaCheck() {
   return callApi('stop_rta_check')
+}
+
+// ═══ 配置备份 ═══
+export async function listConfigBackups() {
+  return callApi('list_config_backups')
+}
+export async function restoreConfigBackup(filename) {
+  return callApiSafe('restore_config_backup', filename)
+}
+export async function deleteConfigBackup(filename) {
+  return callApiSafe('delete_config_backup', filename)
+}
+
+// ═══ 搭建详情 ═══
+export async function getBuildDetails(date = '') {
+  const res = await callApi('get_build_details', date)
+  if (res?.ok) return res.details
+  return []
+}
+
+export async function exportBuildCsv(date = '') {
+  return callApi('export_build_csv', date)
+}
+
+// ═══ 账户池 ═══
+export async function getAccountPool(accountType = '', keyword = '', tag = '',
+                                     platform = '', strategy = '', status = '',
+                                     page = 1, pageSize = 50, pool = 'normal') {
+  return callApi('get_account_pool', accountType, keyword, tag, platform, strategy, status, page, pageSize, pool)
+}
+
+export async function addPoolAccount(accountId, accountType, name = '', tags = [], remark = '',
+                                     groupName = '', status = '', strategy = '', platform = '', pool = 'normal') {
+  return callApi('add_pool_account', accountId, accountType, name, tags, remark, groupName, status, strategy, platform, pool)
+}
+
+export async function addPoolAccountsBatch(accounts, pool = 'normal') {
+  return callApi('add_pool_accounts_batch', accounts, pool)
+}
+
+export async function parseAndImportAccounts(rawText, accountType = 'media', extraTags = [], pool = 'normal') {
+  return callApi('parse_and_import_accounts', rawText, accountType, extraTags, pool)
+}
+
+export async function updatePoolAccount(rowId, data, pool = 'normal') {
+  return callApi('update_pool_account', rowId, data, pool)
+}
+
+export async function deletePoolAccounts(rowIds, pool = 'normal') {
+  return callApi('delete_pool_accounts', rowIds, pool)
+}
+
+export async function importConfigToPool(pool = 'normal') {
+  return callApi('import_config_to_pool', pool)
+}
+
+export async function selectPoolAccounts(profileKey, numGroups = 1, groupSize = 5) {
+  return callApi('select_pool_accounts', profileKey, numGroups, groupSize)
+}
+
+// ═══ 分配日志 ═══
+export async function getAssignLogs(date = '', profileKey = '') {
+  return callApi('get_assign_logs', date, profileKey)
+}
+
+export async function getAssignLogDates() {
+  return callApi('get_assign_log_dates')
 }
 

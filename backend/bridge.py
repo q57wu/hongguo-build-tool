@@ -103,15 +103,14 @@ class EventBridge:
         """搭建完成后自动在每日任务中勾选对应的任务"""
         try:
             from datetime import date as dt_date
-            from backend.services.daily_task_service import get_tasks, toggle_task
+            from backend.services.daily_task_service import get_tasks, set_task_done
             today = dt_date.today().isoformat()
             tasks = get_tasks(today)
             for task in tasks:
                 if task.get("profile_key") == profile_key and not task.get("done"):
-                    toggle_task(today, task["id"])
-                    break
-        except Exception:
-            pass  # 非关键功能，静默失败
+                    set_task_done(today, task["id"])
+        except Exception as e:
+            _logger.warning(f"自动完成每日任务失败: {e}")
 
     def on_drama_completed(self, profile_key: str, drama_name: str):
         """单部剧搭建成功时，更新每日任务的搭建计数"""
@@ -127,8 +126,8 @@ class EventBridge:
                     "task_id": result["task_id"],
                     "build_count": result["build_count"],
                 })
-        except Exception:
-            pass  # 非关键功能，静默失败
+        except Exception as e:
+            _logger.warning(f"更新搭建计数失败: {e}")
 
     def emit_tool_log(self, message: str):
         """推送工具页面日志"""

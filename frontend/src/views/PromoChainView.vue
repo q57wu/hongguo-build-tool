@@ -28,23 +28,31 @@
         <div v-for="(line, i) in logs" :key="i" class="log-line">{{ line }}</div>
         <div v-if="!logs.length" class="log-empty">等待执行...</div>
       </div>
+
+      <!-- 完成后下一步引导 -->
+      <div v-if="!running && logs.length && showNextStep" class="next-step-hint">
+        <span>✅ 生成完成！下一步：</span>
+        <button class="btn btn-ghost btn-sm" @click="goToSplit">✂️ 前往推广链分割</button>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { generatePromoChain, stopPromoChain } from '@/services/api'
+import { useToolLogger } from '../composables/useToolLogger'
 
+const router = useRouter()
 const _cachedDramaNames = localStorage.getItem('promoChain_dramaNames') || ''
 const dramaNames = ref(_cachedDramaNames)
 watch(dramaNames, (v) => localStorage.setItem('promoChain_dramaNames', v))
 
-const running = ref(false)
-const logs = ref([])
-const status = ref('idle')
-const logBox = ref(null)
-const autoScroll = ref(true)
+const showNextStep = ref(false)
+const { logs, running, logBox } = useToolLogger({
+  onDone: () => { showNextStep.value = true }
+})
 
 const _cachedOptions = (() => {
   try { return JSON.parse(localStorage.getItem('promoChain_options') || 'null') } catch { return null }
@@ -63,33 +71,6 @@ watch(taskOptions, (opts) => {
 const statusClass = computed(() => ({ 'status-running': running.value, 'status-idle': !running.value }))
 const statusText = computed(() => running.value ? '运行中' : '就绪')
 
-function onLogScroll() {
-  if (!logBox.value) return
-  const el = logBox.value
-  autoScroll.value = el.scrollHeight - el.scrollTop - el.clientHeight < 40
-}
-
-function onToolLog(e) {
-  logs.value.push(e.detail.message)
-  if (autoScroll.value) {
-    nextTick(() => { if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight })
-  }
-}
-function onToolDone(e) {
-  running.value = false
-}
-
-onMounted(() => {
-  window.addEventListener('honguo:tool-log', onToolLog)
-  window.addEventListener('honguo:tool-done', onToolDone)
-  if (logBox.value) logBox.value.addEventListener('scroll', onLogScroll)
-})
-onUnmounted(() => {
-  window.removeEventListener('honguo:tool-log', onToolLog)
-  window.removeEventListener('honguo:tool-done', onToolDone)
-  if (logBox.value) logBox.value.removeEventListener('scroll', onLogScroll)
-})
-
 async function start() {
   const names = dramaNames.value.split('\n').map(s => s.trim()).filter(Boolean)
   if (!names.length) { logs.value.push('⚠️ 请输入剧名'); return }
@@ -97,11 +78,21 @@ async function start() {
   if (!directions.length) { logs.value.push('⚠️ 请选择至少一个方向'); return }
   running.value = true
   logs.value = []
-  await generatePromoChain(names, directions)
+  showNextStep.value = false
+  try {
+    await generatePromoChain(names, directions)
+  } catch (e) {
+    logs.value.push(`❌ 生成失败: ${e.message || e}`)
+    running.value = false
+  }
 }
 
 async function stop() {
-  await stopPromoChain()
+  try { await stopPromoChain() } catch (e) { logs.value.push(`❌ 停止失败: ${e.message || e}`) }
+}
+
+function goToSplit() {
+  router.push('/promo-split')
 }
 </script>
 
@@ -111,7 +102,7 @@ async function stop() {
 .view-header h2 { font-size: 20px; font-weight: 700; margin-bottom: 4px; }
 .view-desc { font-size: 13px; color: var(--c-dim); }
 .field-label { display: block; font-size: 12px; font-weight: 600; color: var(--c-text-2); margin: 14px 0 6px; }
-.input-area { width: 100%; padding: 10px 14px; border: 1px solid var(--c-border); border-radius: var(--r-sm); font-family: var(--f-mono); font-size: 12px; resize: vertical; background: #fff; color: var(--c-text); outline: none; }
+.input-area { width: 100%; padding: 10px 14px; border: 1px solid var(--c-border); border-radius: var(--r-sm); font-family: var(--f-mono); font-size: 12px; resize: vertical; background: var(--c-card); color: var(--c-text); outline: none; }
 .input-area:focus { border-color: var(--c-primary); }
 
 .checkbox-group { display: flex; flex-wrap: wrap; gap: 12px; }
@@ -121,9 +112,10 @@ async function stop() {
 .btn-row { display: flex; gap: 8px; margin-top: 16px; }
 .status-tag { display: inline-block; font-size: 11px; font-weight: 600; padding: 3px 10px; border-radius: 10px; margin-top: 12px; }
 .status-idle { background: var(--c-surface); color: var(--c-dim); }
-.status-running { background: #ecfdf5; color: #065f46; }
+.status-running { background: rgba(0, 212, 138, 0.12); color: var(--c-green); }
 
 .log-box { margin-top: 12px; background: var(--c-log-bg); border-radius: var(--r-md); padding: 14px; max-height: 360px; overflow-y: auto; font-family: var(--f-mono); font-size: 12px; line-height: 1.7; color: var(--c-log-fg); user-select: text; -webkit-user-select: text; cursor: text; }
 .log-line { padding: 1px 0; }
 .log-empty { color: var(--c-log-dim); }
+.next-step-hint { margin-top: 12px; padding: 10px 14px; background: rgba(0, 212, 138, 0.08); border: 1px solid rgba(0, 212, 138, 0.25); border-radius: var(--r-sm); display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--c-green); }
 </style>

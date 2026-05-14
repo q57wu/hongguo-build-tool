@@ -8,6 +8,7 @@ __pycache__/
 build/
 dist/
 *.spec
+!build_exe.spec
 *.exe
 
 # Frontend build & deps
@@ -34,6 +35,19 @@ judan_cache.txt
 
 # Data directories (user data)
 数据/
+data/
+build_details.json
+build_progress.json
+daily_tasks.json
+批量抓取结果.txt
+
+# AI tool artifacts
+.agents/
+.learnings/
+skills-lock.json
+
+# Test scripts (local only)
+test_*.py
 
 # IDE / OS
 .vscode/

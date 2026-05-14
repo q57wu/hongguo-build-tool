@@ -4,6 +4,7 @@ backend/core/incentive_steps.py
 """
 import re
 import time
+import math
 import logging
 import threading
 from pathlib import Path
@@ -34,7 +35,7 @@ from backend.core.playwright_utils import (
     _safe_page_title, _safe_page_url,
 )
 from backend.core.logging_utils import setup_logger, fmt_duration
-from backend.core.constants import TODAY_STR
+
 import uuid
 from backend.core.config_io import (
     load_config, record_build_success,
@@ -52,6 +53,8 @@ from backend.core.material_ops import (
     _configure_material_filters,
     _find_material_card_on_current_page,
     _get_material_pager,
+    _get_material_list_wrapper,
+    _select_media_material_tab,
     _has_next_material_page,
     _go_to_next_material_page,
     _go_to_material_page,
@@ -219,7 +222,9 @@ def step_fill_ad_name_incentive(popup, group_name, cfg, logger, W):
 
 
 def step_pick_materials_by_page(popup, pages_count, cfg, logger, W,
-                                pick_min=30, pick_max=50, resume_position=None):
+                                pick_min=30, pick_max=50, resume_position=None,
+                                material_lock=None, page_coordinator=None,
+                                worker_id=0):
     """激励搭建：随机顺序选取素材（按页翻取，支持断点续选）"""
     import random
     logger.info("📦 进入素材编辑区域…")
@@ -236,12 +241,8 @@ def step_pick_materials_by_page(popup, pages_count, cfg, logger, W,
     safe_click(popup, batch_add_btn, desc="批量添加素材", logger=logger, W=W)
     wait_small(popup, W.EXTRA)
 
-    tab_media = popup.locator("#tab-account-material")
-    safe_click(popup, tab_media, desc="素材账户tab", logger=logger, W=W)
-    wait_small(popup, W.LONGER)
-
     material_dlg = popup.locator("div.el-dialog:visible").last
-    pane = material_dlg.locator("#pane-account-material")
+    pane = _select_media_material_tab(popup, material_dlg, logger, W)
 
     batch_icon = pane.locator("div.cl-input-area-trigger__icon[title='批量输入']").first
     batch_icon.click(force=True)
@@ -259,30 +260,36 @@ def step_pick_materials_by_page(popup, pages_count, cfg, logger, W,
 
     material_dlg = popup.locator("div.el-dialog:visible").last
     material_dlg.wait_for(state="visible", timeout=TIMEOUT)
-    pane = material_dlg.locator("#pane-account-material")
+    pane = _select_media_material_tab(popup, material_dlg, logger, W)
     logger.info("📦 素材选择弹窗已打开")
 
-    _configure_material_filters(popup, pane, material_dlg, logger, W)
+    actual_page_size = _configure_material_filters(popup, pane, material_dlg, logger, W)
+    if actual_page_size is None:
+        actual_page_size = 100  # backward compat default
 
-    material_wrapper = pane.locator("div.material-wrapper").first
+    material_wrapper = _get_material_list_wrapper(pane)
     material_wrapper.wait_for(state="visible", timeout=TIMEOUT)
     wait_loading_gone(popup, material_wrapper, timeout=30_000)
 
     # 读取分页总数，用于判断本页期望加载多少条
     from backend.core.material_ops import _get_material_total
     page_total = _get_material_total(pane)
-    # 100条/页时，首页期望加载 min(100, total)
-    expected_on_page = min(100, page_total) if page_total and page_total > 0 else 50
-    logger.info(f"📊 分页总数: {page_total or '未知'}, 本页期望加载: {expected_on_page} 条")
+    # 按实际每页条数计算首页期望加载数量
+    expected_on_page = min(actual_page_size, page_total) if page_total and page_total > 0 else min(actual_page_size, 50)
+    logger.info(f"📊 分页总数: {page_total or '未知'}, 每页条数: {actual_page_size}, 本页期望加载: {expected_on_page} 条")
+
+    # 上报实际总页数给 coordinator（如果有）
+    if page_coordinator and page_total and actual_page_size > 0:
+        actual_total_pages = math.ceil(page_total / actual_page_size)
+        page_coordinator.update_total_pages(actual_total_pages)
+        logger.info(f"📊 已上报实际总页数: {actual_total_pages} 页")
 
     load_start = time.time()
-    load_deadline = load_start + 90  # 加长超时到90s，100条加载较慢
+    load_deadline = load_start + 90
     loaded = False
     stable_count = -1
     stable_since = 0.0
-    # 动态稳定阈值：数量达到期望值才可快速放行，未达到则必须等到超时
-    STABLE_THRESHOLD_FULL = 3.0   # 达到期望数量后稳定3秒即可
-    MIN_MATERIAL_COUNT = 10
+    STABLE_THRESHOLD_FULL = 2.0 if actual_page_size < 50 else 3.0
     while time.time() < load_deadline:
         loading_mask = material_wrapper.locator(".el-loading-mask").first
         if loading_mask.count() > 0:
@@ -294,19 +301,17 @@ def step_pick_materials_by_page(popup, pages_count, cfg, logger, W,
                 stable_count = -1
                 wait_small(popup, W.LONG)
                 continue
-        current = material_wrapper.locator("div.material-name").count()
-        if current >= MIN_MATERIAL_COUNT:
+        current = material_wrapper.locator(".material-name:visible").count()
+        if current > 0:
             if current != stable_count:
                 stable_count = current
                 stable_since = time.time()
                 wait_small(popup, W.LONG)
                 continue
-            # 只有达到期望数量才可放行；未达到则持续等待直到超时
-            if current >= expected_on_page:
-                if time.time() - stable_since >= STABLE_THRESHOLD_FULL:
-                    logger.info(f"✅ 素材列表已加载 | {current} 个素材名 (期望 {expected_on_page}, 耗时 {fmt_duration(time.time() - load_start)})")
-                    loaded = True
-                    break
+            if time.time() - stable_since >= STABLE_THRESHOLD_FULL:
+                logger.info(f"✅ 素材列表已加载 | 当前可见 {current} 个素材名 (耗时 {fmt_duration(time.time() - load_start)})")
+                loaded = True
+                break
         wait_small(popup, W.EXTRA)
     if not loaded:
         if stable_count > 0:
@@ -320,7 +325,16 @@ def step_pick_materials_by_page(popup, pages_count, cfg, logger, W,
             return resume_position
     wait_loading_gone(popup, material_wrapper)
 
-    used_names = get_used_material_names()
+    if page_coordinator:
+        # coordinator 已在启动时加载历史，直接用内存集合的快照做本地缓存
+        used_names = set()  # 本地缓存仅用于快速跳过，真正去重靠 coordinator.try_reserve_material
+        _used_count = page_coordinator.get_used_count()
+        logger.info(f"📋 共享去重集合已有 {_used_count} 条素材（含历史 + 其他 worker 已选）")
+    elif material_lock:
+        with material_lock:
+            used_names = get_used_material_names()
+    else:
+        used_names = get_used_material_names()
     if used_names:
         logger.info(f"📋 已排除历史素材 {len(used_names)} 条")
 
@@ -340,21 +354,38 @@ def step_pick_materials_by_page(popup, pages_count, cfg, logger, W,
     current_page = start_page
     global_offset = start_offset
 
-    while picked_count < pick_count:
-        # ── 按位置顺序直接遍历素材卡片，逐个点击 ──
-        # 参考原版脚本：不按名称查找，而是直接遍历 material-item 卡片
-        # 这样即使平台上有大量同名素材，也只跳过"这张卡片"而非所有同名卡
-        try:
-            material_wrapper.evaluate("el => el.scrollTop = 0")
-        except Exception as e:
-            logger.warning(f"step_pick_materials_by_page 滚动到顶部失败: {e}")
-        wait_small(popup, W.SHORT)
+    # ── 逐页扫描选取素材（不跳页）──
+    # 从起始页开始逐页逐卡片扫描，每个素材名称与 used_names 比对，
+    # 未用过则选中，直到达到目标数量。不做任何跳页估算。
 
+    while picked_count < pick_count:
+        # ── coordinator: 认领当前页 ──
+        if page_coordinator:
+            if not page_coordinator.claim_page(worker_id, current_page):
+                # 当前页正被其他 worker 扫描，跳过
+                logger.info(f"⏭️ 第 {current_page + 1} 页正在被其他 worker 扫描，跳过")
+                next_p = page_coordinator.suggest_next_page(worker_id, current_page)
+                if next_p is None:
+                    logger.info("📄 coordinator: 无更多可扫页面")
+                    break
+                if not _go_to_material_page(popup, pane, next_p + 1, logger, W):
+                    logger.warning(f"⚠️ 跳转到第 {next_p + 1} 页失败")
+                    break
+                current_page = next_p
+                global_offset = 0
+                material_wrapper = _get_material_list_wrapper(pane)
+                wait_loading_gone(popup, material_wrapper, timeout=10_000)
+                continue
+
+        # ── Fix 2: 基于滚动的遍历替代索引遍历，兼容虚拟滚动 ──
+        # 每次滚动到当前视口，读取已渲染（非空）的卡片，处理后再下滚一屏
         # 等待卡片出现
         try:
             material_wrapper.locator("div.material-item").first.wait_for(state="visible", timeout=15_000)
         except Exception:
             logger.warning(f"⚠️ 第 {current_page + 1} 页无素材卡片，跳过")
+            if page_coordinator:
+                page_coordinator.release_page(worker_id, current_page)
             if not _has_next_material_page(pane):
                 break
             if not _go_to_next_material_page(popup, pane, logger, W):
@@ -364,100 +395,252 @@ def step_pick_materials_by_page(popup, pages_count, cfg, logger, W,
             continue
         wait_small(popup, W.NORMAL)
 
-        cards = material_wrapper.locator("div.material-item")
-        total_cards = cards.count()
-        logger.info(f"📄 第 {current_page + 1} 页共 {total_cards} 个素材卡片")
+        # 获取 material-wrapper 视口高度，用于每次滚动步长
+        try:
+            viewport_height = material_wrapper.evaluate("el => el.clientHeight") or 600
+        except Exception:
+            viewport_height = 600
 
-        skip_on_page = 0
+        # 滚动到顶部开始
+        try:
+            material_wrapper.evaluate("el => el.scrollTop = 0")
+        except Exception as e:
+            logger.warning(f"step_pick_materials_by_page 滚动到顶部失败: {e}")
+        wait_small(popup, W.SHORT)
+
+        total_cards = material_wrapper.locator("div.material-item").count()
+        logger.info(f"📄 第 {current_page + 1} 页 DOM 中共 {total_cards} 个素材卡片（含虚拟滚动空壳）")
+
+        # Fix 3: 分离跳过计数器
+        skip_history = 0   # 历史记录命中
+        skip_dedup = 0     # 本页内重名去重
+        skip_empty = 0     # 虚拟滚动未渲染空壳
         pick_on_page = 0
         page_selected_set = set()  # 本页内已选集合，防同页重名重复点击
+        seen_names_this_scroll = set()  # 当前滚动批次已处理的名称，用于检测翻到头
 
-        start_idx = global_offset if current_page == start_page else 0
-        for i in range(start_idx, total_cards):
-            if picked_count >= pick_count:
-                break
-            card = cards.nth(i)
-            # 读取素材名称
-            name_el = card.locator("div.material-name").first
+        scroll_rounds = 0
+        max_scroll_rounds = 200
+        no_new_rounds = 0
+
+        while picked_count < pick_count and scroll_rounds < max_scroll_rounds:
+            scroll_rounds += 1
+            wait_small(popup, W.TINY)
+
             try:
-                mat_name = name_el.inner_text(timeout=3_000).strip() if name_el.count() > 0 else ""
+                scroll_state = material_wrapper.evaluate(
+                    "el => ({top: el.scrollTop, height: el.clientHeight, total: el.scrollHeight})"
+                )
             except Exception:
-                mat_name = ""
+                scroll_state = {"top": 0, "height": viewport_height, "total": viewport_height}
+            scroll_top = float(scroll_state.get("top") or 0)
+            scroll_height = float(scroll_state.get("height") or viewport_height or 600)
+            scroll_total = float(scroll_state.get("total") or scroll_height)
+            at_bottom_before = scroll_top + scroll_height >= scroll_total - 8
 
-            # 跳过已用过的素材（历史记录）
-            if mat_name and mat_name in used_names:
-                skip_on_page += 1
-                continue
+            cards = material_wrapper.locator("div.material-item:visible")
+            batch_count = cards.count()
+            new_names_this_round = 0
+            batch_had_any_rendered = False
 
-            # 跳过本页内已选过的同名素材（同页重名视为同一素材的不同上传）
-            if mat_name and mat_name in page_selected_set:
-                skip_on_page += 1
-                continue
+            for i in range(batch_count):
+                if picked_count >= pick_count:
+                    break
+                card = cards.nth(i)
 
-            # 选中这个素材卡片
-            try:
-                card.scroll_into_view_if_needed()
-                wait_small(popup, W.TINY)
-                card.click(force=True)
-                wait_small(popup, W.TINY)
-                record_name = mat_name if mat_name else f"未知素材_{int(time.time())}_{i}"
-                picked_count += 1
-                pick_on_page += 1
-                chosen_names.append(record_name)
-                if mat_name:
-                    page_selected_set.add(mat_name)
-            except Exception as e:
-                # DOM detached 通常是列表重新渲染导致，尝试重新获取卡片
-                if "not attached to the DOM" in str(e) or "not stable" in str(e):
-                    try:
-                        wait_small(popup, W.SHORT)
-                        # 重新获取卡片列表并重试该索引
-                        _retry_cards = material_wrapper.locator("div.material-item")
-                        if i < _retry_cards.count():
-                            _retry_card = _retry_cards.nth(i)
-                            _retry_card.scroll_into_view_if_needed()
-                            wait_small(popup, W.TINY)
-                            _retry_card.click(force=True)
-                            wait_small(popup, W.TINY)
-                            record_name = mat_name if mat_name else f"未知素材_{int(time.time())}_{i}"
-                            picked_count += 1
-                            pick_on_page += 1
-                            chosen_names.append(record_name)
-                            if mat_name:
-                                page_selected_set.add(mat_name)
+                try:
+                    name_el = card.locator(".material-name:visible").first
+                    if name_el.count() > 0:
+                        mat_name = (name_el.get_attribute("title") or "").strip()
+                        if not mat_name:
+                            mat_name = name_el.inner_text(timeout=2_000).strip()
+                    else:
+                        mat_name = ""
+                except Exception:
+                    mat_name = ""
+
+                if not mat_name:
+                    skip_empty += 1
+                    continue
+
+                batch_had_any_rendered = True
+                if mat_name not in seen_names_this_scroll:
+                    new_names_this_round += 1
+                else:
+                    continue
+
+                if mat_name in used_names or (page_coordinator and page_coordinator.is_material_used(mat_name)):
+                    skip_history += 1
+                    seen_names_this_scroll.add(mat_name)
+                    continue
+
+                if mat_name in page_selected_set:
+                    skip_dedup += 1
+                    seen_names_this_scroll.add(mat_name)
+                    continue
+
+                try:
+                    # ── 去重判断：优先用 coordinator 内存去重，否则回退文件锁 ──
+                    if page_coordinator:
+                        # 原子性 check-and-reserve，跨 worker 实时同步
+                        if not page_coordinator.try_reserve_material(mat_name):
+                            skip_history += 1
+                            seen_names_this_scroll.add(mat_name)
+                            used_names.add(mat_name)
                             continue
-                    except Exception:
-                        pass
-                logger.warning(f"step_pick_materials_by_page 点击素材卡片失败: {e}")
+                        card.scroll_into_view_if_needed()
+                        wait_small(popup, W.TINY)
+                        card.click(force=True)
+                        wait_small(popup, W.TINY)
+                    elif material_lock:
+                        with material_lock:
+                            latest_used_names = get_used_material_names()
+                            if mat_name in latest_used_names:
+                                used_names.update(latest_used_names)
+                                skip_history += 1
+                                seen_names_this_scroll.add(mat_name)
+                                should_skip = True
+                            else:
+                                should_skip = False
+                        if should_skip:
+                            continue
+                        card.scroll_into_view_if_needed()
+                        wait_small(popup, W.TINY)
+                        card.click(force=True)
+                        wait_small(popup, W.TINY)
+                        with material_lock:
+                            add_material_history([mat_name])
+                    else:
+                        card.scroll_into_view_if_needed()
+                        wait_small(popup, W.TINY)
+                        card.click(force=True)
+                        wait_small(popup, W.TINY)
+                    picked_count += 1
+                    pick_on_page += 1
+                    chosen_names.append(mat_name)
+                    page_selected_set.add(mat_name)
+                    seen_names_this_scroll.add(mat_name)
+                    used_names.add(mat_name)
+                except Exception as e:
+                    if "not attached to the DOM" in str(e) or "not stable" in str(e):
+                        try:
+                            wait_small(popup, W.SHORT)
+                            _retry_cards = material_wrapper.locator("div.material-item:visible")
+                            if i < _retry_cards.count():
+                                _retry_card = _retry_cards.nth(i)
+                                # 重试时同样用 coordinator 去重
+                                if page_coordinator:
+                                    if not page_coordinator.try_reserve_material(mat_name):
+                                        skip_history += 1
+                                        seen_names_this_scroll.add(mat_name)
+                                        used_names.add(mat_name)
+                                        continue
+                                    _retry_card.scroll_into_view_if_needed()
+                                    wait_small(popup, W.TINY)
+                                    _retry_card.click(force=True)
+                                    wait_small(popup, W.TINY)
+                                elif material_lock:
+                                    with material_lock:
+                                        latest_used_names = get_used_material_names()
+                                        if mat_name in latest_used_names:
+                                            used_names.update(latest_used_names)
+                                            skip_history += 1
+                                            seen_names_this_scroll.add(mat_name)
+                                            should_skip = True
+                                        else:
+                                            should_skip = False
+                                    if should_skip:
+                                        continue
+                                    _retry_card.scroll_into_view_if_needed()
+                                    wait_small(popup, W.TINY)
+                                    _retry_card.click(force=True)
+                                    wait_small(popup, W.TINY)
+                                    with material_lock:
+                                        add_material_history([mat_name])
+                                else:
+                                    _retry_card.scroll_into_view_if_needed()
+                                    wait_small(popup, W.TINY)
+                                    _retry_card.click(force=True)
+                                    wait_small(popup, W.TINY)
+                                picked_count += 1
+                                pick_on_page += 1
+                                chosen_names.append(mat_name)
+                                page_selected_set.add(mat_name)
+                                seen_names_this_scroll.add(mat_name)
+                                used_names.add(mat_name)
+                                continue
+                        except Exception:
+                            pass
+                    logger.warning(f"step_pick_materials_by_page 点击素材卡片失败: {e}")
 
-        if skip_on_page > 0:
-            logger.info(f"⏭️ 第 {current_page + 1} 页跳过 {skip_on_page} 条（已用/重名）")
+            no_new_rounds = no_new_rounds + 1 if new_names_this_round == 0 else 0
+            if at_bottom_before and no_new_rounds >= 2:
+                logger.debug(f"🔚 第 {current_page + 1} 页已滚到底且连续无新素材（第 {scroll_rounds} 轮）")
+                break
+
+            try:
+                before_top = material_wrapper.evaluate("el => el.scrollTop") or 0
+                material_wrapper.evaluate(
+                    "(el, step) => { el.scrollTop = Math.min(el.scrollTop + step, el.scrollHeight); }",
+                    max(300, int(viewport_height * 0.85)),
+                )
+                wait_small(popup, W.SHORT)
+                after_state = material_wrapper.evaluate(
+                    "el => ({top: el.scrollTop, height: el.clientHeight, total: el.scrollHeight})"
+                )
+                after_top = float(after_state.get("top") or 0)
+                after_bottom = after_top + float(after_state.get("height") or viewport_height or 600) >= float(after_state.get("total") or 0) - 8
+                if after_top <= float(before_top) + 2 and after_bottom:
+                    no_new_rounds += 1
+            except Exception:
+                break
+            wait_small(popup, W.SHORT)
+
+        # Fix 3: 分类记录跳过日志
+        if skip_empty > 0:
+            logger.debug(f"🕳️ 第 {current_page + 1} 页跳过 {skip_empty} 个空壳卡片（虚拟滚动未渲染）")
+        if skip_history > 0:
+            logger.info(f"⏭️ 第 {current_page + 1} 页跳过 {skip_history} 条（历史已用）")
+        if skip_dedup > 0:
+            logger.info(f"⏭️ 第 {current_page + 1} 页跳过 {skip_dedup} 条（本页重名去重）")
         if pick_on_page > 0:
             logger.info(f"✅ 第 {current_page + 1} 页选取 {pick_on_page} 条 (累计 {picked_count}/{pick_count})")
+
+        # ── coordinator: 释放当前页 ──
+        if page_coordinator:
+            page_coordinator.release_page(worker_id, current_page)
 
         if picked_count >= pick_count:
             break
 
-        if not _has_next_material_page(pane):
-            logger.info("📄 已到最后一页，无更多素材")
-            break
-        if not _go_to_next_material_page(popup, pane, logger, W):
-            break
-        # 翻页后等待新页面素材加载完成（与首页相同的稳定检测逻辑）
+        # ── 决定下一页 ──
+        if page_coordinator:
+            next_p = page_coordinator.suggest_next_page(worker_id, current_page)
+            if next_p is None:
+                logger.info("📄 coordinator: 无更多可扫页面（已遍历一圈）")
+                break
+            # 如果建议页就是下一页且有下一页按钮，用简单翻页（更快更稳）
+            if next_p == current_page + 1 and _has_next_material_page(pane):
+                if not _go_to_next_material_page(popup, pane, logger, W):
+                    break
+            else:
+                logger.info(f"🔄 coordinator 建议跳转: 第{current_page + 1}页 → 第{next_p + 1}页")
+                if not _go_to_material_page(popup, pane, next_p + 1, logger, W):
+                    logger.warning(f"⚠️ 跳转到第 {next_p + 1} 页失败")
+                    break
+        else:
+            # 无 coordinator：原有逻辑
+            if not _has_next_material_page(pane):
+                logger.info("📄 已到最后一页，无更多素材")
+                break
+            if not _go_to_next_material_page(popup, pane, logger, W):
+                break
+        material_wrapper = _get_material_list_wrapper(pane)
         wait_loading_gone(popup, material_wrapper, timeout=30_000)
         _page_load_start = time.time()
         _page_load_deadline = _page_load_start + 60
         _pg_stable_count = -1
         _pg_stable_since = 0.0
-        # 翻页后即将进入 current_page+1 页（0-based），计算该页期望加载条数
-        _next_page = current_page + 1  # 即将进入的页码（0-based）
-        if page_total and page_total > 0:
-            _items_before_next = (_next_page) * 100  # 前面所有页的总条数
-            _remaining = page_total - _items_before_next
-            # 非末页: 期望100条；末页: 期望剩余条数（至少1）
-            _pg_expected = min(100, max(1, _remaining)) if _remaining < 100 else 100
-        else:
-            _pg_expected = 100  # 无总数信息时默认期望100条
         while time.time() < _page_load_deadline:
             _pg_mask = material_wrapper.locator(".el-loading-mask").first
             if _pg_mask.count() > 0:
@@ -469,23 +652,38 @@ def step_pick_materials_by_page(popup, pages_count, cfg, logger, W,
                     _pg_stable_count = -1
                     wait_small(popup, W.LONG)
                     continue
-            _pg_current = material_wrapper.locator("div.material-name").count()
+            _pg_current = material_wrapper.locator(".material-name:visible").count()
             if _pg_current >= 1:
                 if _pg_current != _pg_stable_count:
                     _pg_stable_count = _pg_current
                     _pg_stable_since = time.time()
                     wait_small(popup, W.LONG)
                     continue
-                # 只有达到期望数量才可放行；未达到则持续等待直到超时
-                if _pg_current >= _pg_expected:
-                    if time.time() - _pg_stable_since >= STABLE_THRESHOLD_FULL:
-                        logger.info(f"📄 第 {current_page + 2} 页素材已加载: {_pg_current} 条 (期望 {_pg_expected}, 耗时 {fmt_duration(time.time() - _page_load_start)})")
-                        break
+                if time.time() - _pg_stable_since >= STABLE_THRESHOLD_FULL:
+                    logger.info(f"📄 新页素材已加载: 当前可见 {_pg_current} 条 (耗时 {fmt_duration(time.time() - _page_load_start)})")
+                    break
             wait_small(popup, W.EXTRA)
-        current_page += 1
+        if page_coordinator:
+            # 跳页模式下，从 pane 获取真实当前页码
+            from backend.core.material_ops import _get_active_material_page
+            current_page = _get_active_material_page(pane) - 1  # 0-based
+        else:
+            current_page += 1
         global_offset = 0
 
     new_resume = {"page": current_page, "offset": global_offset}
+    if picked_count < pick_count:
+        _used_total = page_coordinator.get_used_count() if page_coordinator else len(used_names)
+        logger.warning(
+            f"⚠️ 素材选取不足: 目标 {pick_count} 条，实际仅选到 {picked_count} 条"
+            f"（已扫描至第 {current_page + 1} 页）。"
+            f"可能原因：可用新素材总量不足，或历史已用素材 ({_used_total} 条) 覆盖了大部分库存。"
+        )
+        try:
+            from backend.utils.diagnostics import dump_page_structure
+            dump_page_structure(popup, logger=logger, reason="incentive material picked insufficient")
+        except Exception:
+            pass
     logger.info(f"📦 素材选取完成: 已选 {picked_count}/{pick_count} 条 | 结束位置: 第{current_page+1}页 偏移{global_offset}")
 
     if picked_count == 0:
@@ -494,6 +692,7 @@ def step_pick_materials_by_page(popup, pages_count, cfg, logger, W,
         if cancel_btn.count() > 0:
             cancel_btn.click(force=True)
             wait_small(popup, W.NORMAL)
+        new_resume["picked_count"] = picked_count
         return new_resume
 
     submit_btn = material_dlg.locator("button.submit-button:visible").last
@@ -510,9 +709,247 @@ def step_pick_materials_by_page(popup, pages_count, cfg, logger, W,
     wait_idle(popup, mask_timeout=5_000)
     wait_small(popup, W.LOAD)
 
-    add_material_history(chosen_names)
     logger.info(f"✅ 素材选择完成，已记录 {len(chosen_names)} 条素材到历史")
+
+    # coordinator 模式下，选取过程中只做内存去重，结束时批量持久化到文件
+    if page_coordinator and chosen_names:
+        try:
+            add_material_history(chosen_names)
+            logger.info(f"💾 已批量写入 {len(chosen_names)} 条素材到历史文件")
+        except Exception as e:
+            logger.warning(f"⚠️ 批量写入素材历史失败: {e}")
+
+    new_resume["picked_count"] = picked_count
+
+    try:
+        # Check if drawer is still visible before trying to close
+        visible_drawers = popup.locator("div.drawer-content:visible")
+        if visible_drawers.count() == 0:
+            logger.info("✅ 素材编辑抽屉已自动关闭")
+        else:
+            drawer, wrap = get_visible_drawer(popup)
+            scroll_wrap_to_bottom(popup, wrap, W)
+            try:
+                click_top_confirm(popup, logger=logger, W=W, timeout=8_000)
+            except Exception:
+                # Confirm button not found, try Escape
+                try:
+                    popup.keyboard.press("Escape")
+                    wait_small(popup, W.NORMAL)
+                except Exception:
+                    pass
+            wait_small(popup, W.LONGER)
+            # Final check
+            if popup.locator("div.drawer-content:visible").count() == 0:
+                logger.info("✅ 素材编辑抽屉已关闭")
+            else:
+                logger.warning("⚠️ 素材编辑抽屉仍未关闭，尝试Escape")
+                try:
+                    popup.keyboard.press("Escape")
+                    wait_small(popup, W.NORMAL)
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.warning(f"⚠️ 关闭素材编辑抽屉失败(忽略继续): {e}")
+
     return new_resume
+
+
+def step_pick_materials_by_ids_incentive(popup, material_ids, cfg, logger, W):
+    """激励搭建：使用自定义素材ID选取素材（复用单本的素材ID逻辑，适配激励UI入口）"""
+    logger.info(f"🎯 使用自定义素材ID逻辑，共 {len(material_ids)} 个")
+    logger.info("📦 进入素材编辑区域…")
+
+    # 清空已有素材
+    clear_btn = popup.locator("div.table-header:has(span:has-text('创意素材')) button:has-text('清空')").first
+    if clear_btn.count() > 0:
+        safe_click(popup, clear_btn, desc="清空创意素材", logger=logger, W=W)
+        wait_small(popup, W.NORMAL)
+
+    # 点击第3个编辑按钮（素材区域）
+    edit3 = popup.locator("tfoot td button:has-text('编辑')").nth(2)
+    safe_click(popup, edit3, desc="编辑按钮(素材)", logger=logger, W=W)
+    wait_small(popup, W.EXTRA)
+
+    # 批量添加素材
+    batch_add_btn = popup.locator("button:has-text('批量添加素材')").first
+    safe_click(popup, batch_add_btn, desc="批量添加素材", logger=logger, W=W)
+    wait_small(popup, W.EXTRA)
+
+    # 切到素材账户tab
+    material_dlg = popup.locator("div.el-dialog:visible").last
+    pane = _select_media_material_tab(popup, material_dlg, logger, W)
+
+    # 输入素材账户ID
+    batch_icon = pane.locator("div.cl-input-area-trigger__icon[title='批量输入']").first
+    batch_icon.click(force=True)
+    wait_small(popup, W.LONG)
+    id_input = popup.locator("input[placeholder*='请粘贴或输入账户ID']").last
+    id_input.wait_for(state="visible", timeout=TIMEOUT)
+    id_input.click(force=True)
+    wait_small(popup, W.SHORT)
+    id_input.fill(cfg["material_account_id"])
+    wait_small(popup, W.MEDIUM)
+    logger.info(f"🧾 固定素材账号已填入: {cfg['material_account_id']}")
+
+    # 切换搜索类型到"素材ID"
+    try:
+        search_select = pane.locator("div.cl-search-input div.el-select, div.cl-input-area div.el-select").first
+        if search_select.count() > 0:
+            select_input = search_select.locator("input.el-input__inner").first
+            safe_click(popup, select_input, desc="搜索类型下拉", logger=logger, W=W)
+            wait_small(popup, W.NORMAL)
+            dropdown = popup.locator("ul.el-select-dropdown__list:visible").last
+            dropdown.wait_for(state="visible", timeout=TIMEOUT)
+            id_option = dropdown.locator("li.el-select-dropdown__item").filter(has_text="素材ID").first
+            if id_option.count() > 0:
+                safe_click(popup, id_option, desc="选择素材ID", logger=logger, W=W)
+                wait_small(popup, W.MEDIUM)
+    except Exception as e:
+        logger.warning(f"⚠️ 切换搜索类型失败: {e}")
+
+    # 批量搜索图标
+    batch_search_icon = pane.locator("div.cl-search-input__suffix-icon[title='批量搜索']").first
+    if batch_search_icon.count() == 0:
+        batch_search_icon = pane.locator("[title='批量搜索']").first
+    safe_click(popup, batch_search_icon, desc="批量搜索图标", logger=logger, W=W)
+    wait_small(popup, W.LONG)
+
+    # 输入素材ID
+    batch_textarea = popup.locator("textarea:visible").last
+    batch_input_el = popup.locator("input[placeholder*='请粘贴'], input[placeholder*='请输入'], input[placeholder*='素材']").last
+    if batch_textarea.count() > 0:
+        target_el = batch_textarea
+    elif batch_input_el.count() > 0:
+        target_el = batch_input_el
+    else:
+        target_el = None
+    if target_el:
+        target_el.wait_for(state="visible", timeout=TIMEOUT)
+        target_el.click(force=True)
+        wait_small(popup, W.SHORT)
+        for mid in material_ids:
+            popup.keyboard.type(str(mid))
+            popup.keyboard.press("Enter")
+        wait_small(popup, W.MEDIUM)
+        logger.info(f"✅ 已逐行输入 {len(material_ids)} 个素材ID")
+
+    # 点击搜索
+    old_material_count = _get_material_list_wrapper(pane).locator("div.material-item").count()
+    safe_click(popup, popup.locator("button.el-button--primary:visible").filter(has_text="搜索").last, desc="搜索素材ID", logger=logger, W=W)
+    wait_small(popup, W.SEARCH)
+
+    # 等待素材列表刷新
+    material_dlg = popup.locator("div.el-dialog:visible").last
+    material_dlg.wait_for(state="visible", timeout=TIMEOUT)
+    pane = _select_media_material_tab(popup, material_dlg, logger, W)
+    material_wrapper = _get_material_list_wrapper(pane)
+    material_wrapper.wait_for(state="visible", timeout=TIMEOUT)
+    expected_count = len(material_ids)
+    load_deadline = time.time() + 60
+    refreshed = False
+    stable_count = -1
+    stable_since = 0
+    while time.time() < load_deadline:
+        loading_mask = material_wrapper.locator(".el-loading-mask").first
+        if loading_mask.count() > 0:
+            try:
+                style = loading_mask.get_attribute("style") or ""
+            except Exception:
+                style = ""
+            if "display: none" not in style:
+                stable_count = -1
+                wait_small(popup, W.LONG)
+                continue
+        current_count = material_wrapper.locator("div.material-item").count()
+        if current_count == expected_count and current_count > 0:
+            refreshed = True
+            break
+        if current_count != stable_count:
+            stable_count = current_count
+            stable_since = time.time()
+            wait_small(popup, W.LONG)
+            continue
+        if current_count == stable_count and (time.time() - stable_since) > 3:
+            if current_count != old_material_count and current_count > 0:
+                refreshed = True
+                break
+        wait_small(popup, W.LONG)
+    if not refreshed:
+        logger.error("❌ 素材列表刷新超时(60s)")
+        cancel_btn = material_dlg.locator("button:visible").filter(has_text="取消").last
+        if cancel_btn.count() > 0:
+            cancel_btn.click(force=True)
+        return 0
+
+    wait_loading_gone(popup, material_wrapper)
+    wait_small(popup, W.NORMAL)
+
+    # 全选所有搜索到的素材
+    cards = material_wrapper.locator("div.material-item")
+    total = cards.count()
+    picked = 0
+    for i in range(total):
+        try:
+            safe_click(popup, cards.nth(i), desc=f"素材卡片{i+1}/{total}", logger=logger, W=W)
+            wait_small(popup, W.TINY)
+            picked += 1
+        except Exception:
+            pass
+    if picked == 0:
+        cancel_btn = material_dlg.locator("button:visible").filter(has_text="取消").last
+        if cancel_btn.count() > 0:
+            cancel_btn.click(force=True)
+        return 0
+    logger.info(f"✅ 已全选 {picked}/{total} 个素材")
+
+    # 提交
+    submit_btn = material_dlg.locator("button.submit-button:visible").last
+    if submit_btn.count() > 0:
+        safe_click(popup, submit_btn, desc="素材提交按钮", logger=logger, W=W)
+    else:
+        safe_click(popup, material_dlg.locator("button:visible").filter(has_text="提交").last, desc="素材提交(备选)", logger=logger, W=W)
+    click_optional_confirm(popup, desc="素材提交确认按钮", timeout=8_000, logger=logger, W=W)
+    try:
+        material_dlg.wait_for(state="hidden", timeout=20_000)
+        logger.info("✅ 素材弹窗已关闭，已回到批量新建页面")
+    except Exception:
+        logger.warning("⚠️ 素材弹窗关闭等待超时，继续尝试后续提交")
+    wait_idle(popup, mask_timeout=5_000)
+    wait_small(popup, W.LOAD)
+
+    try:
+        # Check if drawer is still visible before trying to close
+        visible_drawers = popup.locator("div.drawer-content:visible")
+        if visible_drawers.count() == 0:
+            logger.info("✅ 素材编辑抽屉已自动关闭")
+        else:
+            drawer, wrap = get_visible_drawer(popup)
+            scroll_wrap_to_bottom(popup, wrap, W)
+            try:
+                click_top_confirm(popup, logger=logger, W=W, timeout=8_000)
+            except Exception:
+                # Confirm button not found, try Escape
+                try:
+                    popup.keyboard.press("Escape")
+                    wait_small(popup, W.NORMAL)
+                except Exception:
+                    pass
+            wait_small(popup, W.LONGER)
+            # Final check
+            if popup.locator("div.drawer-content:visible").count() == 0:
+                logger.info("✅ 素材编辑抽屉已关闭")
+            else:
+                logger.warning("⚠️ 素材编辑抽屉仍未关闭，尝试Escape")
+                try:
+                    popup.keyboard.press("Escape")
+                    wait_small(popup, W.NORMAL)
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.warning(f"⚠️ 关闭素材编辑抽屉失败(忽略继续): {e}")
+
+    return picked
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -636,8 +1073,14 @@ def run_build_incentive(profile_key: str, log_callback=None, stop_event=None):
                     logger.info("➡️ 步骤7/8：填写广告名称")
                     step_fill_ad_name_incentive(popup, group_name, cfg, logger, W)
                     check_stop(stop_event)
-                    logger.info("➡️ 步骤8/8：顺序选取素材（30-50条）")
-                    resume_position = step_pick_materials_by_page(popup, pages_per_round, cfg, logger, W, resume_position=resume_position)
+                    logger.info("➡️ 步骤8/8：选取素材")
+                    custom_mids = meta.get("material_ids", []) if meta else []
+                    if custom_mids:
+                        logger.info(f"🎯 检测到自定义素材ID {len(custom_mids)} 个")
+                        step_pick_materials_by_ids_incentive(popup, custom_mids, cfg, logger, W)
+                    else:
+                        logger.info("📦 使用随机翻页选取素材（30-50条）")
+                        resume_position = step_pick_materials_by_page(popup, pages_per_round, cfg, logger, W, resume_position=resume_position)
                     check_stop(stop_event)
                     ad_count = step_submit_and_close(popup, page, logger, W)
                     completed_groups.append(group_name)
@@ -659,11 +1102,7 @@ def run_build_incentive(profile_key: str, log_callback=None, stop_event=None):
                         logger.warning(f"run_build_incentive 关闭弹窗失败(AccountsMissingError): {e}")
                     continue
                 except StopRequested:
-                    logger.info("⏹ 用户中止")
-                    try:
-                        if popup: popup.close()
-                    except Exception as e:
-                        logger.warning(f"run_build_incentive 关闭弹窗失败(StopRequested): {e}")
+                    logger.info("⏹ 用户中止（保留当前标签页）")
                     raise
                 except Exception as e:
                     failed_groups.append(group_name)

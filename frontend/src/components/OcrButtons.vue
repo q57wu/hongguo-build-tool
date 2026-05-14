@@ -29,6 +29,21 @@ defineEmits(['pick', 'paste'])
   padding: 2px 8px;
   font-size: 11px;
   white-space: nowrap;
+  font-family: var(--f-ui);
+  color: var(--c-text-2);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border-s);
+  border-radius: var(--r-sm);
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.ocr-btn:hover:not(:disabled) {
+  color: var(--c-accent);
+  border-color: var(--c-accent);
+  background: rgba(240, 165, 0, 0.08);
+}
+.ocr-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 .ocr-error {
   font-size: 11px;

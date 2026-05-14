@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 _logger = logging.getLogger(__name__)
+_chrome_process = None
 
 # Chrome 常见安装路径（Windows）
 CHROME_PATHS = [
@@ -83,7 +84,14 @@ def launch_chrome(port: int = DEFAULT_CDP_PORT) -> dict:
 
     # 3. 启动 Chrome（参数与 启动浏览器.bat 保持一致）
     try:
-        user_data = r"C:\ChromeProfile"
+        user_data = None
+        try:
+            from backend.config_manager import load_config
+            user_data = load_config().get("common", {}).get("chrome_profile_dir", "")
+        except Exception:
+            pass
+        if not user_data:
+            user_data = r"C:\ChromeProfile"
         Path(user_data).mkdir(parents=True, exist_ok=True)
 
         cmd = [
@@ -98,7 +106,8 @@ def launch_chrome(port: int = DEFAULT_CDP_PORT) -> dict:
             "--disable-blink-features=AutomationControlled",
         ]
 
-        subprocess.Popen(cmd, creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+        global _chrome_process
+        _chrome_process = subprocess.Popen(cmd, creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
         _logger.info(f"Chrome 已启动，端口: {port}")
 
         # 4. 等待 CDP 就绪
@@ -107,7 +116,11 @@ def launch_chrome(port: int = DEFAULT_CDP_PORT) -> dict:
             if is_cdp_available(port):
                 return {"ok": True, "message": f"Chrome 已启动并连接（端口 {port}）", "already_running": False}
 
-        return {"ok": False, "message": "Chrome 已启动但 CDP 连接超时，请稍后重试", "already_running": False}
+        return {
+            "ok": False,
+            "message": f"Chrome 已启动但 CDP 连接超时。请先关闭所有 Chrome 窗口后重试，或在设置里改用独立 Chrome 数据目录：{user_data}",
+            "already_running": False,
+        }
 
     except Exception as e:
         _logger.error(f"启动 Chrome 失败: {e}")
@@ -141,5 +154,18 @@ def get_cdp_info(port: int = DEFAULT_CDP_PORT) -> dict:
         req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=3) as resp:
             return json.loads(resp.read())
-    except Exception:
+    except Exception as e:
+        _logger.error(f"获取 CDP 信息失败: {e}")
         return {}
+
+
+def cleanup_chrome():
+    """尝试终止由本工具启动的 Chrome 进程"""
+    global _chrome_process
+    if _chrome_process is not None:
+        try:
+            _chrome_process.terminate()
+            _logger.info("Chrome 进程已终止")
+        except Exception as e:
+            _logger.debug(f"终止 Chrome 进程失败: {e}")
+        _chrome_process = None

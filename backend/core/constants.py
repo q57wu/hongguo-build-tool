@@ -133,7 +133,12 @@ PROFILE_EDITABLE_FIELDS = (
 TIMEOUT = 60_000
 RE_CONFIRM = re.compile(r"确\s*定|确定|确\s*认|确认")
 RE_MMDD = re.compile(r'(?<!\d)(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])(?!\d)')
-TODAY_STR = datetime.now().strftime("%m%d")
+def get_today_str() -> str:
+    """每次调用时动态获取当天日期（MMDD格式），避免跨天不更新。"""
+    return datetime.now().strftime("%m%d")
+
+# 向后兼容：模块加载时的快照，已废弃，请改用 get_today_str()
+TODAY_STR = get_today_str()
 
 # ═══════════════════════════════════════════════════════════════
 #  等待时间（基准值，运行时乘以 wait_scale）

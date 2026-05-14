@@ -4,13 +4,17 @@
 """
 
 import json
+import os
 import re
+import tempfile
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 DATA_FILE = Path(__file__).resolve().parents[2] / "daily_tasks.json"
+_lock = threading.Lock()
 
 
 def _read_data() -> dict:
@@ -24,8 +28,22 @@ def _read_data() -> dict:
 
 
 def _write_data(data: dict):
-    """将数据写入 JSON 文件"""
-    DATA_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    """将数据原子写入 JSON 文件（写入临时文件后 rename）"""
+    content = json.dumps(data, ensure_ascii=False, indent=2)
+    # 写入同目录临时文件，然后原子 rename
+    dir_path = DATA_FILE.parent
+    try:
+        fd, tmp_path = tempfile.mkstemp(dir=str(dir_path), suffix='.tmp', prefix='daily_tasks_')
+        try:
+            os.write(fd, content.encode('utf-8'))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        # Windows: 目标文件存在时 os.rename 会失败，用 os.replace 代替
+        os.replace(tmp_path, str(DATA_FILE))
+    except OSError:
+        # 回退到普通写入（极端情况下临时文件创建失败）
+        DATA_FILE.write_text(content, encoding="utf-8")
 
 
 def _short_id() -> str:
@@ -52,9 +70,10 @@ def save_tasks(date: str, tasks: list):
     :param date: 日期字符串，格式 YYYY-MM-DD
     :param tasks: 完整的任务列表
     """
-    data = _read_data()
-    data[date] = tasks
-    _write_data(data)
+    with _lock:
+        data = _read_data()
+        data[date] = tasks
+        _write_data(data)
 
 
 def add_tasks(date: str, tasks: list):
@@ -63,26 +82,27 @@ def add_tasks(date: str, tasks: list):
     :param date: 日期字符串，格式 YYYY-MM-DD
     :param tasks: 要追加的任务列表（无需包含 id/created_at 等，会自动补全）
     """
-    data = _read_data()
-    existing = data.get(date, [])
-    now = datetime.now().isoformat()
-    for t in tasks:
-        task = {
-            "id": t.get("id") or _short_id(),
-            "person": t.get("person", ""),
-            "title": t.get("title", ""),
-            "detail": t.get("detail", ""),
-            "done": t.get("done", False),
-            "created_at": t.get("created_at") or now,
-            "done_at": t.get("done_at"),
-            "params": t.get("params", {}),
-            "profile_key": t.get("profile_key", ""),
-            "build_count": t.get("build_count", 0),
-            "build_total": t.get("build_total", 0),
-        }
-        existing.append(task)
-    data[date] = existing
-    _write_data(data)
+    with _lock:
+        data = _read_data()
+        existing = data.get(date, [])
+        now = datetime.now().isoformat()
+        for t in tasks:
+            task = {
+                "id": t.get("id") or _short_id(),
+                "person": t.get("person", ""),
+                "title": t.get("title", ""),
+                "detail": t.get("detail", ""),
+                "done": t.get("done", False),
+                "created_at": t.get("created_at") or now,
+                "done_at": t.get("done_at"),
+                "params": t.get("params", {}),
+                "profile_key": t.get("profile_key", ""),
+                "build_count": t.get("build_count", 0),
+                "build_total": t.get("build_total", 0),
+            }
+            existing.append(task)
+        data[date] = existing
+        _write_data(data)
 
 
 def toggle_task(date: str, task_id: str) -> bool:
@@ -92,14 +112,34 @@ def toggle_task(date: str, task_id: str) -> bool:
     :param task_id: 任务 ID
     :return: 切换后的 done 状态；未找到任务时返回 False
     """
-    data = _read_data()
-    tasks = data.get(date, [])
-    for task in tasks:
-        if task["id"] == task_id:
-            task["done"] = not task["done"]
-            task["done_at"] = datetime.now().isoformat() if task["done"] else None
-            _write_data(data)
-            return task["done"]
+    with _lock:
+        data = _read_data()
+        tasks = data.get(date, [])
+        for task in tasks:
+            if task["id"] == task_id:
+                task["done"] = not task["done"]
+                task["done_at"] = datetime.now().isoformat() if task["done"] else None
+                _write_data(data)
+                return task["done"]
+    return False
+
+
+def set_task_done(date: str, task_id: str) -> bool:
+    """
+    将某任务强制设为已完成（幂等，不会翻转）。
+    :param date: 日期字符串
+    :param task_id: 任务 ID
+    :return: 操作成功返回 True；未找到任务时返回 False
+    """
+    with _lock:
+        data = _read_data()
+        tasks = data.get(date, [])
+        for task in tasks:
+            if task["id"] == task_id:
+                task["done"] = True
+                task["done_at"] = task.get("done_at") or datetime.now().isoformat()
+                _write_data(data)
+                return True
     return False
 
 
@@ -109,10 +149,11 @@ def delete_task(date: str, task_id: str):
     :param date: 日期字符串
     :param task_id: 任务 ID
     """
-    data = _read_data()
-    tasks = data.get(date, [])
-    data[date] = [t for t in tasks if t["id"] != task_id]
-    _write_data(data)
+    with _lock:
+        data = _read_data()
+        tasks = data.get(date, [])
+        data[date] = [t for t in tasks if t["id"] != task_id]
+        _write_data(data)
 
 
 def increment_build_count(date: str, profile_key: str) -> dict:
@@ -122,19 +163,20 @@ def increment_build_count(date: str, profile_key: str) -> dict:
     :param profile_key: 搭建配置 key，如 "安卓-每留"
     :return: {"task_id": ..., "build_count": ...} 或空 dict
     """
-    data = _read_data()
-    tasks = data.get(date, [])
-    for task in tasks:
-        if task.get("profile_key") == profile_key and not task.get("done"):
-            task["build_count"] = task.get("build_count", 0) + 1
-            # 如果有 drama_count 参数且已达到目标，自动标记完成
-            params = task.get("params", {})
-            target = params.get("drama_count", 0)
-            if target > 0 and task["build_count"] >= target:
-                task["done"] = True
-                task["done_at"] = datetime.now().isoformat()
-            _write_data(data)
-            return {"task_id": task["id"], "build_count": task["build_count"]}
+    with _lock:
+        data = _read_data()
+        tasks = data.get(date, [])
+        for task in tasks:
+            if task.get("profile_key") == profile_key and not task.get("done"):
+                task["build_count"] = task.get("build_count", 0) + 1
+                # 如果有 drama_count 参数且已达到目标，自动标记完成
+                params = task.get("params", {})
+                target = params.get("drama_count", 0)
+                if target > 0 and task["build_count"] >= target:
+                    task["done"] = True
+                    task["done_at"] = datetime.now().isoformat()
+                _write_data(data)
+                return {"task_id": task["id"], "build_count": task["build_count"]}
     return {}
 
 

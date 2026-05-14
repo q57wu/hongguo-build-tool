@@ -58,6 +58,65 @@ def _get_material_total(pane):
     return int(m.group(1)) if m else None
 
 
+def _select_media_material_tab(popup, material_dlg, logger, W):
+    candidates = [
+        material_dlg.locator("#tab-account-material").first,
+        material_dlg.locator("[role='tab']:visible").filter(has_text="媒体素材").last,
+        material_dlg.locator(".el-tabs__item:visible").filter(has_text="媒体素材").last,
+    ]
+    for tab in candidates:
+        try:
+            if tab.count() > 0:
+                safe_click(popup, tab, desc="媒体素材tab", logger=logger, W=W)
+                wait_small(popup, W.LONGER)
+                logger.info("📁 已切换到【媒体素材】栏")
+                break
+        except Exception as e:
+            if logger:
+                logger.warning(f"⚠️ 切换媒体素材tab失败: {e}")
+    pane = material_dlg.locator("#pane-account-material:visible")
+    if pane.count() > 0:
+        try:
+            pane.first.wait_for(state="visible", timeout=TIMEOUT)
+        except Exception:
+            pass
+        return pane.first
+    raise RuntimeError("未能切换到【媒体素材】栏，停止素材选择以避免扫到其他栏")
+
+
+def _get_material_list_wrapper(pane):
+    wrappers = pane.locator("div.material-wrapper")
+    best = None
+    best_score = -1
+    try:
+        count = wrappers.count()
+    except Exception:
+        count = 0
+    for i in range(count):
+        wrapper = wrappers.nth(i)
+        try:
+            box = wrapper.bounding_box()
+        except Exception:
+            box = None
+        try:
+            item_count = wrapper.locator("div.material-item").count()
+        except Exception:
+            item_count = 0
+        try:
+            name_count = wrapper.locator(".material-name").count()
+        except Exception:
+            name_count = 0
+        width = (box or {}).get("width", 0) or 0
+        height = (box or {}).get("height", 0) or 0
+        score = item_count * 10 + name_count * 5 + min(width, 1200) / 10 + min(height, 800) / 5
+        if width < 200 or height < 150:
+            score -= 500
+        if score > best_score:
+            best_score = score
+            best = wrapper
+    return best or wrappers.last
+
+
 def _get_active_material_page(pane):
     """获取当前激活的页码，无法判断时返回 1。"""
     pager = _get_material_pager(pane)
@@ -85,9 +144,61 @@ def _has_next_material_page(pane):
     return disabled is None and "disabled" not in cls
 
 
+def _get_visible_material_names(material_wrapper, limit=10):
+    names = material_wrapper.locator(".material-name:visible")
+    try:
+        count = min(names.count(), limit)
+    except Exception:
+        count = 0
+    result = []
+    for i in range(count):
+        try:
+            el = names.nth(i)
+            name = (el.get_attribute("title") or "").strip()
+            if not name:
+                name = el.inner_text(timeout=2_000).strip()
+            if name:
+                result.append(name)
+        except Exception:
+            continue
+    return result
+
+
+def _get_first_visible_material_name(material_wrapper):
+    names = _get_visible_material_names(material_wrapper, limit=1)
+    return names[0] if names else ""
+
+
+def _wait_material_content_refresh(popup, material_wrapper, old_visible_names, logger, timeout=15):
+    """等待素材列表前几个可见名称发生变化，最多等待 timeout 秒。"""
+    if isinstance(old_visible_names, str):
+        old_visible_names = [old_visible_names] if old_visible_names else []
+    if not old_visible_names:
+        return True
+    old_signature = tuple(old_visible_names)
+    deadline = time.time() + timeout
+    last_visible_names = []
+    while time.time() < deadline:
+        current_names = _get_visible_material_names(material_wrapper)
+        if current_names:
+            last_visible_names = current_names
+            if tuple(current_names) != old_signature:
+                return True
+        popup.wait_for_timeout(500)
+    if logger:
+        visible_first = (last_visible_names[0] if last_visible_names else old_visible_names[0])[:30]
+        logger.warning(f"⚠️ 等待素材内容刷新超时（可见素材仍未变化，首条: {visible_first}）")
+    try:
+        from backend.utils.diagnostics import dump_page_structure
+        dump_page_structure(popup, logger=logger, reason="material content refresh timeout")
+    except Exception:
+        pass
+    return False
+
+
 def _go_to_next_material_page(popup, pane, logger, W):
     """
-    点击素材列表的"下一页"按钮，等待页码切换。
+    点击素材列表的"下一页"按钮，等待页码切换 **且素材内容真正刷新**。
     返回 True 表示翻页成功，False 表示失败或已是最后一页。
     """
     pager = _get_material_pager(pane)
@@ -100,7 +211,12 @@ def _go_to_next_material_page(popup, pane, logger, W):
     cls = next_btn.get_attribute("class") or ""
     if disabled is not None or "disabled" in cls:
         return False
+
     old_page = _get_active_material_page(pane)
+
+    material_wrapper = _get_material_list_wrapper(pane)
+    visible_names_before = _get_visible_material_names(material_wrapper)
+
     try:
         next_btn.scroll_into_view_if_needed()
         popup.wait_for_timeout(W.TINY if W else 200)
@@ -109,50 +225,127 @@ def _go_to_next_material_page(popup, pane, logger, W):
         if logger:
             logger.warning(f"⚠️ 点击素材下一页失败: {e}")
         return False
+
     popup.wait_for_timeout(W.LOAD if W else 1500)
-    material_wrapper = pane.locator("div.material-wrapper").first
     if material_wrapper.count() > 0:
         wait_loading_gone(popup, material_wrapper, timeout=10_000)
+
+    # ── 第1阶段：等待页码数字变化（最多 5 秒） ──
+    page_changed = False
     for _ in range(10):
         new_page = _get_active_material_page(pane)
         if new_page != old_page:
-            return True
+            page_changed = True
+            break
         popup.wait_for_timeout(500)
-    return False
+
+    if not page_changed:
+        if logger:
+            logger.warning("⚠️ 翻页后页码未变化")
+        return False
+
+    # ── 第2阶段：等待素材内容真正刷新（前几个可见素材名称变化，最多 30 秒） ──
+    material_wrapper = _get_material_list_wrapper(pane)
+    if visible_names_before:
+        content_refreshed = _wait_material_content_refresh(
+            popup, material_wrapper, visible_names_before, logger, timeout=30
+        )
+        if not content_refreshed:
+            # ── 重试策略A：scroll reset ──
+            retry_a_ok = False
+            try:
+                material_wrapper.evaluate("el => el.scrollTop = 0")
+                popup.wait_for_timeout(2000)
+                names_after_scroll = _get_visible_material_names(material_wrapper)
+                if names_after_scroll and tuple(names_after_scroll) != tuple(visible_names_before):
+                    if logger:
+                        logger.info("✅ scroll reset 后素材内容已刷新")
+                    retry_a_ok = True
+            except Exception:
+                pass
+
+            if not retry_a_ok:
+                # ── 重试策略B：回退翻页（上一页 → 下一页） ──
+                retry_b_ok = False
+                try:
+                    pager_retry = _get_material_pager(pane)
+                    if pager_retry is not None:
+                        prev_btn_retry = pager_retry.locator("button.btn-prev").first
+                        if prev_btn_retry.count() > 0:
+                            prev_btn_retry.click(force=True)
+                            popup.wait_for_timeout(W.LOAD if W else 1500)
+                            wait_loading_gone(popup, pane, timeout=10_000)
+                            # 重新获取分页组件（DOM 可能已刷新）
+                            pager_retry = _get_material_pager(pane)
+                            if pager_retry is not None:
+                                next_btn_retry = pager_retry.locator("button.btn-next").first
+                                if next_btn_retry.count() > 0:
+                                    next_btn_retry.click(force=True)
+                                    popup.wait_for_timeout(W.LOAD if W else 1500)
+                                    wait_loading_gone(popup, pane, timeout=10_000)
+                                    material_wrapper = _get_material_list_wrapper(pane)
+                                    refreshed_b = _wait_material_content_refresh(
+                                        popup, material_wrapper, visible_names_before, logger, timeout=15
+                                    )
+                                    if refreshed_b:
+                                        if logger:
+                                            logger.info("✅ 回退翻页后素材内容已刷新")
+                                        retry_b_ok = True
+                except Exception as e:
+                    if logger:
+                        logger.warning(f"⚠️ 回退翻页重试失败: {e}")
+
+                if not retry_b_ok:
+                    if logger:
+                        logger.warning(f"⚠️ 翻页后页码已变但素材内容未刷新（可见首条素材仍为: {visible_names_before[0][:30]}），停止继续扫描旧内容")
+                    return False
+    if logger:
+        logger.debug(f"📄 翻页成功: 第 {old_page} → {_get_active_material_page(pane)} 页")
+    return True
 
 
 def _go_to_material_page(popup, pane, page_no, logger, W):
     """
     跳转到素材列表的指定页码。
-    支持直接点击页码按钮或逐步翻页。
+    **仅通过逐页点击"下一页"/"上一页"按钮翻页**，不使用直接点击页码按钮
+    或"前往第X页"输入框（这些方式在该平台上有 bug，页码变了但内容不刷新）。
     返回 True 表示成功到达目标页。
     """
-    pager = _get_material_pager(pane)
-    if pager is None:
-        return _get_active_material_page(pane) == page_no
-    for _ in range(20):
+    max_attempts = 200  # 安全上限，防止无限循环
+    for attempt in range(max_attempts):
         current_page = _get_active_material_page(pane)
         if current_page == page_no:
             return True
-        visible_target = pager.locator("li.number").filter(has_text=str(page_no)).first
-        if visible_target.count() > 0:
-            safe_click(popup, visible_target, desc=f"素材页码{page_no}", logger=logger, W=W)
-            wait_small(popup, W.LOAD)
-            wait_loading_gone(popup, pane)
-            continue
-        if current_page < page_no and _has_next_material_page(pane):
-            _go_to_next_material_page(popup, pane, logger, W)
-            continue
-        prev_btn = pager.locator("button.btn-prev").first
-        if current_page > page_no and prev_btn.count() > 0:
+        if current_page < page_no:
+            # 需要往后翻
+            if not _has_next_material_page(pane):
+                if logger:
+                    logger.warning(f"⚠️ 已到最后一页({current_page})，无法到达第 {page_no} 页")
+                break
+            if not _go_to_next_material_page(popup, pane, logger, W):
+                if logger:
+                    logger.warning(f"⚠️ 向后翻页失败，停在第 {current_page} 页")
+                break
+        else:
+            # 需要往前翻
+            pager = _get_material_pager(pane)
+            if pager is None:
+                break
+            prev_btn = pager.locator("button.btn-prev").first
+            if prev_btn.count() == 0:
+                break
             disabled = prev_btn.get_attribute("disabled")
             cls = prev_btn.get_attribute("class") or ""
-            if disabled is None and "disabled" not in cls:
-                safe_click(popup, prev_btn, desc="素材上一页", logger=logger, W=W)
-                wait_small(popup, W.LOAD)
-                wait_loading_gone(popup, pane)
-                continue
-        break
+            if disabled is not None or "disabled" in cls:
+                if logger:
+                    logger.warning(f"⚠️ 已到第一页，无法到达第 {page_no} 页")
+                break
+            material_wrapper = _get_material_list_wrapper(pane)
+            _pre_names = _get_visible_material_names(material_wrapper)
+            safe_click(popup, prev_btn, desc="素材上一页", logger=logger, W=W)
+            wait_small(popup, W.LOAD)
+            wait_loading_gone(popup, pane)
+            _wait_material_content_refresh(popup, material_wrapper, _pre_names, logger, timeout=10)
     return _get_active_material_page(pane) == page_no
 
 
@@ -165,7 +358,7 @@ def _find_material_card_on_current_page(popup, material_dlg, pane, material_name
     在当前页的素材列表中通过滚动查找指定名称的素材卡片。
     返回对应 material-item 的 locator，未找到则返回 None。
     """
-    material_wrapper = pane.locator("div.material-wrapper").first
+    material_wrapper = _get_material_list_wrapper(pane)
     seen_rounds = 0
     try:
         material_wrapper.evaluate("el => el.scrollTop = 0")
@@ -220,11 +413,8 @@ def _open_material_dialog(popup, drama_name, cfg, logger, W, use_keyword):
     batch_add_btn = popup.locator("button:has-text('批量添加素材')").first
     safe_click(popup, batch_add_btn, desc="批量添加素材", logger=logger, W=W)
     wait_small(popup, W.EXTRA)
-    tab_media = popup.locator("#tab-account-material")
-    safe_click(popup, tab_media, desc="素材账户tab", logger=logger, W=W)
-    wait_small(popup, W.LONGER)
     material_dlg = popup.locator("div.el-dialog:visible").last
-    pane = material_dlg.locator("#pane-account-material")
+    pane = _select_media_material_tab(popup, material_dlg, logger, W)
     if use_keyword:
         search_input = pane.locator("input[placeholder*='关键词查询']").first
         search_input.fill(drama_name)
@@ -244,16 +434,20 @@ def _open_material_dialog(popup, drama_name, cfg, logger, W, use_keyword):
     wait_small(popup, W.SEARCH)
     material_dlg = popup.locator("div.el-dialog:visible").last
     material_dlg.wait_for(state="visible", timeout=TIMEOUT)
-    pane = material_dlg.locator("#pane-account-material")
+    pane = _select_media_material_tab(popup, material_dlg, logger, W)
     return material_dlg, pane
 
 
-def _configure_material_filters(popup, pane, material_dlg, logger, W):
+def _configure_material_filters(popup, pane, material_dlg, logger, W) -> int:
     """
     配置素材过滤条件：将类型切换为"视频"，将分页大小切换为 100 条/页。
     过滤配置失败时记录警告并继续（不中断流程）。
+
+    返回：实际生效的每页条数（int）。成功切到100时返回100；
+    若切换失败则尝试选最大可用选项，并返回实际检测到的当前页大小；
+    无法检测时返回 20（Element UI 默认值）。
     """
-    material_wrapper = pane.locator("div.material-wrapper").first
+    material_wrapper = _get_material_list_wrapper(pane)
     try:
         type_area = pane.locator("div.select-area:has(label:has-text('类型'))").first
         if type_area.count() > 0:
@@ -267,21 +461,93 @@ def _configure_material_filters(popup, pane, material_dlg, logger, W):
             logger.warning('⚠️ 未找到"类型："选择区域，无法强制切为视频')
     except Exception as e:
         logger.warning(f"⚠️ 切换素材类型为视频时出错(忽略继续): {e}")
+
+    active_page_size = 20  # Element UI 默认值
     try:
         size_input = pane.locator("span.el-pagination__sizes input.el-input__inner").first
         if size_input.count() > 0:
-            size_input.click(force=True)
-            wait_small(popup, W.NORMAL)
-            option_100 = popup.locator("ul.el-select-dropdown__list:visible li.el-select-dropdown__item").filter(has_text="100").last
-            if option_100.count() > 0:
-                option_100.click(force=True)
-                wait_loading_gone(popup, material_wrapper, timeout=30_000)
-                wait_small(popup, W.LONG)
-                logger.info("📄 已切换分页为100条/页")
-            else:
-                logger.warning("⚠️ 未找到100条/页选项")
+            switched = False
+            for _attempt in range(3):
+                # 先尝试点击分页区域确保获得焦点，再点击下拉输入框
+                try:
+                    pager = _get_material_pager(pane)
+                    if pager is not None:
+                        pager.click(force=True)
+                        wait_small(popup, W.SHORT)
+                except Exception:
+                    pass
+                size_input.click(force=True)
+                # 稍等片刻再检查下拉列表，避免列表尚未渲染
+                wait_small(popup, W.NORMAL)
+                wait_small(popup, W.SHORT)
+                try:
+                    popup.locator("ul.el-select-dropdown__list:visible").last.wait_for(
+                        state="visible", timeout=3_000
+                    )
+                except Exception:
+                    wait_small(popup, W.LONG)
+                    continue
+                dropdown_items = popup.locator(
+                    "ul.el-select-dropdown__list:visible li.el-select-dropdown__item"
+                )
+                option_100 = dropdown_items.filter(has_text="100").last
+                if option_100.count() > 0:
+                    option_100.click(force=True)
+                    wait_loading_gone(popup, material_wrapper, timeout=30_000)
+                    wait_small(popup, W.LONG)
+                    logger.info("📄 已切换分页为100条/页")
+                    switched = True
+                    return 100
+                # "100"选项不存在——收集所有可用选项，尝试选最大的
+                item_count = dropdown_items.count()
+                available_sizes = []
+                for idx in range(item_count):
+                    try:
+                        text = dropdown_items.nth(idx).inner_text().strip()
+                        num_match = re.search(r"\d+", text)
+                        if num_match:
+                            available_sizes.append((int(num_match.group()), idx))
+                    except Exception:
+                        continue
+                if available_sizes:
+                    available_sizes.sort(key=lambda x: x[0], reverse=True)
+                    best_size, best_idx = available_sizes[0]
+                    logger.warning(
+                        f"⚠️ 未找到100条/页选项，可用选项: {[s for s, _ in available_sizes]}，尝试选最大值 {best_size}"
+                    )
+                    dropdown_items.nth(best_idx).click(force=True)
+                    wait_loading_gone(popup, material_wrapper, timeout=30_000)
+                    wait_small(popup, W.LONG)
+                    logger.info(f"📄 已切换分页为 {best_size} 条/页（最大可用）")
+                    switched = True
+                    return best_size
+                popup.keyboard.press("Escape")
+                wait_small(popup, W.NORMAL)
+            # 3次重试均未成功——读取当前输入框文本来检测实际页大小
+            if not switched:
+                try:
+                    size_text = size_input.input_value().strip()
+                except Exception:
+                    size_text = ""
+                if not size_text:
+                    try:
+                        size_text = size_input.get_attribute("value") or ""
+                    except Exception:
+                        size_text = ""
+                num_match = re.search(r"\d+", size_text)
+                if num_match:
+                    active_page_size = int(num_match.group())
+                    logger.warning(
+                        f"⚠️ 未找到100条/页选项，当前实际页大小为 {active_page_size} 条/页"
+                    )
+                else:
+                    logger.warning(
+                        f"⚠️ 未找到100条/页选项，且无法读取当前页大小（文本='{size_text}'），"
+                        f"假定默认 {active_page_size} 条/页"
+                    )
     except Exception as e:
         logger.warning(f"⚠️ 分页切换失败(忽略继续): {e}")
+    return active_page_size
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -301,7 +567,7 @@ def _collect_material_candidates(popup, material_dlg, pane, drama_name, logger, 
 
     返回：候选素材列表，每项为 {"name": str, "page": int, "date": str|None}
     """
-    material_wrapper = pane.locator("div.material-wrapper").first
+    material_wrapper = _get_material_list_wrapper(pane)
     material_wrapper.wait_for(state="visible", timeout=TIMEOUT)
     wait_loading_gone(popup, material_wrapper, timeout=30_000)
     load_start = time.time()
@@ -322,11 +588,11 @@ def _collect_material_candidates(popup, material_dlg, pane, drama_name, logger, 
                 name_confirmed = False
                 wait_small(popup, W.LONG)
                 continue
-        current = material_dlg.locator("div.material-name").count()
+        current = material_wrapper.locator("div.material-name").count()
         if current > 0:
             if not name_confirmed:
                 try:
-                    first_name = material_dlg.locator("div.material-name").first.inner_text().strip()
+                    first_name = material_wrapper.locator("div.material-name").first.inner_text().strip()
                 except Exception:
                     first_name = ""
                 if first_name and drama_name in first_name:
@@ -374,14 +640,27 @@ def _collect_material_candidates(popup, material_dlg, pane, drama_name, logger, 
         except Exception:
             pass
         wait_small(popup, W.SHORT)
-        for scroll_round in range(90):
-            names = material_wrapper.locator("div.material-name")
+        for scroll_round in range(160):
+            try:
+                scroll_state = material_wrapper.evaluate(
+                    "el => ({top: el.scrollTop, height: el.clientHeight, total: el.scrollHeight})"
+                )
+            except Exception:
+                scroll_state = {"top": 0, "height": 600, "total": 600}
+            scroll_top = float(scroll_state.get("top") or 0)
+            scroll_height = float(scroll_state.get("height") or 600)
+            scroll_total = float(scroll_state.get("total") or scroll_height)
+            at_bottom = scroll_top + scroll_height >= scroll_total - 8
+
+            names = material_wrapper.locator("div.material-name:visible")
             count = names.count()
             found_new_this_round = 0
             for i in range(count):
                 name_el = names.nth(i)
                 try:
-                    material_name = name_el.inner_text().strip()
+                    material_name = (name_el.get_attribute("title") or "").strip()
+                    if not material_name:
+                        material_name = name_el.inner_text(timeout=2_000).strip()
                 except Exception:
                     continue
                 if not material_name or material_name in processed_names:
@@ -409,26 +688,25 @@ def _collect_material_candidates(popup, material_dlg, pane, drama_name, logger, 
                 no_new_rounds = 0
             else:
                 no_new_rounds += 1
-            if no_new_rounds >= 6:
+            if at_bottom and no_new_rounds >= 2:
                 break
             try:
-                has_more_before_scroll = material_wrapper.evaluate("el => el.scrollTop + el.clientHeight < el.scrollHeight - 2")
-                if total_count is not None and len(processed_names) < total_count and not has_more_before_scroll:
-                    total_poll_rounds += 1
-                    if total_poll_rounds <= 30:
-                        wait_small(popup, W.LONG)
-                        material_wrapper.evaluate("el => el.scrollTop = 0")
-                        wait_small(popup, W.SHORT)
-                        continue
-                    else:
-                        break
-                material_wrapper.evaluate("""el => {
-                    el.scrollTop = Math.min(el.scrollTop + el.clientHeight, el.scrollHeight);
-                }""")
-                if not has_more_before_scroll:
-                    material_wrapper.evaluate("el => el.scrollTop = el.scrollHeight")
+                before_top = material_wrapper.evaluate("el => el.scrollTop") or 0
+                material_wrapper.evaluate(
+                    "(el, step) => { el.scrollTop = Math.min(el.scrollTop + step, el.scrollHeight); }",
+                    max(300, int(scroll_height * 0.85)),
+                )
+                wait_small(popup, W.SHORT)
+                after_state = material_wrapper.evaluate(
+                    "el => ({top: el.scrollTop, height: el.clientHeight, total: el.scrollHeight})"
+                )
+                after_top = float(after_state.get("top") or 0)
+                after_bottom = after_top + float(after_state.get("height") or scroll_height) >= float(after_state.get("total") or 0) - 8
+                if after_top <= float(before_top) + 2 and after_bottom:
+                    no_new_rounds += 1
             except Exception as e:
                 logger.warning(f"⚠️ 素材列表滚动失败(忽略继续): {e}")
+                break
             wait_small(popup, W.LOAD if no_new_rounds > 0 else W.LONGER)
         page_new_count = len(processed_names) - page_start_count
         logger.info(f"📄 第{current_page}页扫描完成，本页新增 {page_new_count} 个素材名，累计 {len(processed_names)}/{total_count if total_count is not None else '未知'}")
@@ -512,7 +790,7 @@ def _select_and_submit_materials(popup, material_dlg, pane, available_candidates
         _cancel_and_return()
         return 0
     logger.info(f"✅ 可用素材: 带日期 {len(dated_candidates)} 个 + 无日期 {len(undated_candidates)} 个 = 共 {len(selected_candidates)} 个")
-    selected_candidates.sort(key=lambda x: (x.get("page", 1), x.get("date", ""), x.get("name", "")))
+    selected_candidates.sort(key=lambda x: (x.get("page", 1), x.get("date") or "", x.get("name") or ""))
     picked_count = 0
     pick_start = time.time()
     try:

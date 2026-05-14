@@ -33,6 +33,11 @@ def safe_click(popup, locator, *, timeout=TIMEOUT, retries=3, desc="", logger=No
             if logger: logger.warning(f"⚠️ 点击失败({desc}) 第{attempt}/{retries}次(force={use_force}): {e}")
         if attempt < retries:
             popup.wait_for_timeout(W.LONG if W else 1000)
+    try:
+        from backend.utils.diagnostics import dump_page_structure
+        dump_page_structure(popup, logger=logger or _logger, reason=f"safe_click failed: {desc}")
+    except Exception as e:
+        _logger.debug(f"safe_click 自动诊断失败: {e}")
     raise Exception(f"❌ 点击最终失败({desc})，已重试{retries}次")
 
 
@@ -49,6 +54,11 @@ def wait_loading_gone(popup, container, *, timeout=30_000):
         try: mask.wait_for(state="hidden", timeout=timeout)
         except PlaywrightTimeout as e:
             _logger.debug(f"wait_loading_gone: loading mask 超时未消失: {e}")
+            try:
+                from backend.utils.diagnostics import dump_page_structure
+                dump_page_structure(popup, logger=_logger, reason="loading mask timeout")
+            except Exception as diag_e:
+                _logger.debug(f"wait_loading_gone 自动诊断失败: {diag_e}")
 
 
 def wait_idle(target, *, mask_timeout=8_000, network=False, network_timeout=3_000):
@@ -92,48 +102,90 @@ def _safe_page_url(page):
 
 
 def _is_browser_internal_page(url):
-    value = (url or "").lower()
+    # Treat empty/None URL as internal — indicates a broken/disconnected page
+    if not url:
+        return True
+    value = url.lower()
     return value.startswith(("about:", "chrome:", "devtools:", "edge:", "trae:"))
 
 
 def select_build_page(context, logger):
-    pages = list(context.pages)
-    logger.info(f"🔎 当前 CDP 连接到 {len(pages)} 个页面")
-    usable_pages = []
-    for idx, pg in enumerate(pages, 1):
-        url = _safe_page_url(pg)
-        title = _safe_page_title(pg)
-        logger.info(f"  页面{idx}: {title or '无标题'} | {url or '无URL'}")
-        if not _is_browser_internal_page(url):
-            usable_pages.append(pg)
+    def _do_select(pages):
+        """Inner logic: enumerate pages, filter, score, and return the best page.
+        Returns None if no valid page is found (triggers a retry at the outer level)."""
+        usable_pages = []
+        for idx, pg in enumerate(pages, 1):
+            url = _safe_page_url(pg)
+            title = _safe_page_title(pg)
+            logger.info(f"  页面{idx}: {title or '无标题'} | {url or '无URL'}")
+            # Only accept pages with a non-empty URL that is not a browser internal page.
+            # An empty URL means the CDP connection to that page is broken/disconnected.
+            if url and not _is_browser_internal_page(url):
+                usable_pages.append(pg)
 
-    candidates = []
-    for pg in usable_pages:
-        url = _safe_page_url(pg).lower()
-        title = _safe_page_title(pg).lower()
-        score = 0
-        if "qianchuan" in url or "ad.oceanengine" in url or "巨量" in title or "千川" in title:
-            score += 80
-        if "promotion" in url or "campaign" in url or "project" in url or "广告" in title or "计划" in title or "推广" in title:
-            score += 30
-        try:
-            if pg.locator("button:has-text('批量新建')").count() > 0:
-                score += 70
-            elif pg.locator("button:has-text('新建')").count() > 0:
+        candidates = []
+        for pg in usable_pages:
+            url = _safe_page_url(pg).lower()
+            title = _safe_page_title(pg).lower()
+            score = 0
+            if "qianchuan" in url or "ad.oceanengine" in url or "巨量" in title or "千川" in title:
+                score += 80
+            if "promotion" in url or "campaign" in url or "project" in url or "广告" in title or "计划" in title or "推广" in title:
                 score += 30
-        except Exception as e:
-            _logger.debug(f"select_build_page: 评分时按钮检查失败: {e}")
-        candidates.append((score, pg))
+            try:
+                if pg.locator("button:has-text('批量新建')").count() > 0:
+                    score += 70
+                elif pg.locator("button:has-text('新建')").count() > 0:
+                    score += 30
+            except Exception as e:
+                _logger.debug(f"select_build_page: 评分时按钮检查失败: {e}")
+            candidates.append((score, pg))
 
-    candidates.sort(key=lambda item: item[0], reverse=True)
-    if candidates and candidates[0][0] > 0:
-        page = candidates[0][1]
-    elif usable_pages:
-        page = usable_pages[-1]
-    elif pages:
-        page = pages[-1]
-    else:
-        raise RuntimeError("没有检测到可控制的浏览器页面，请确认浏览器已用 9222 调试端口启动")
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        if candidates and candidates[0][0] > 0:
+            return candidates[0][1]
+        elif usable_pages:
+            return usable_pages[-1]
+        return None
+
+    MAX_RETRIES = 2
+    RETRY_DELAY_MS = 2_000
+
+    for attempt in range(MAX_RETRIES + 1):
+        pages = list(context.pages)
+        logger.info(f"🔎 当前 CDP 连接到 {len(pages)} 个页面" +
+                    (f"（第 {attempt + 1} 次枚举）" if attempt > 0 else ""))
+
+        if not pages:
+            raise RuntimeError("没有检测到可控制的浏览器页面，请确认浏览器已用 9222 调试端口启动")
+
+        page = _do_select(pages)
+
+        # Validate the selected page: it must have a non-empty URL and title.
+        # An empty URL/title after filtering means the connection was temporarily flaky.
+        if page is not None:
+            final_url = _safe_page_url(page)
+            final_title = _safe_page_title(page)
+            if final_url and final_title:
+                # Fully valid page found
+                break
+            else:
+                logger.warning(
+                    f"⚠️ 选中页面状态异常（url='{final_url}', title='{final_title}'），"
+                    f"可能是 CDP 连接不稳定，准备重试（{attempt + 1}/{MAX_RETRIES + 1}）"
+                )
+        else:
+            logger.warning(
+                f"⚠️ 未找到可用页面，准备重试（{attempt + 1}/{MAX_RETRIES + 1}）"
+            )
+
+        if attempt < MAX_RETRIES:
+            time.sleep(RETRY_DELAY_MS / 1000)
+        else:
+            raise RuntimeError(
+                "CDP 连接不稳定：多次枚举后仍未找到有效操作页面（所有页面 URL/标题均为空）。"
+                "请检查浏览器是否正常运行并已用 9222 调试端口启动。"
+            )
 
     page.set_default_timeout(15_000)
     # bring_to_front 已移除：select_build_page 选页时不弹前台，避免干扰用户
@@ -168,6 +220,11 @@ def get_visible_layer(popup, *, desc="弹窗", timeout=15_000, logger=None, W=No
             details.append(f"{sel}={popup.locator(sel).count()}")
         except Exception as e:
             details.append(f"{sel}=?(err:{e})")
+    try:
+        from backend.utils.diagnostics import dump_page_structure
+        dump_page_structure(popup, logger=logger or _logger, reason=f"visible layer timeout: {desc}")
+    except Exception as e:
+        _logger.debug(f"get_visible_layer 自动诊断失败: {e}")
     raise PlaywrightTimeout(f"等待{desc}超时，未匹配到可见弹层；{' | '.join(details)}")
 
 

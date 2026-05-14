@@ -15,6 +15,7 @@ const routes = [
   { path: '/crawl-material', name: 'crawl-material', component: () => import('../views/CrawlMaterialView.vue'), meta: { title: '爬取历史跑量素材' } },
   { path: '/rta-tool', name: 'rta-tool', component: () => import('../views/RtaToolView.vue'), meta: { title: 'RTA 工具' } },
   { path: '/daily-task', name: 'daily-task', component: () => import('../views/DailyTaskView.vue'), meta: { title: '每日任务' } },
+  { path: '/account-pool', name: 'account-pool', component: () => import('../views/AccountPoolView.vue'), meta: { title: '账户池' } },
   { path: '/settings', name: 'settings', component: () => import('../views/SettingsView.vue'), meta: { title: '设置' } },
 ]
 

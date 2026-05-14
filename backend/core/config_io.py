@@ -5,6 +5,7 @@ backend/core/config_io.py
 """
 import re
 import json
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -18,6 +19,8 @@ from backend.core.constants import (
     PROFILE_EDITABLE_FIELDS,
 )
 from backend.utils.file_utils import save_json_atomic, load_json_safe
+
+_config_lock = threading.Lock()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -41,6 +44,7 @@ def _default_config() -> dict:
         "common": {
             "cdp_endpoint": "http://localhost:9222",
             "chrome_path": "",
+            "chrome_profile_dir": "",
             "download_dir": "",
             "operator_name": "",
             "drama_titles": [],
@@ -62,101 +66,104 @@ def _empty_group() -> dict:
 # ═══════════════════════════════════════════════════════════════
 def load_config() -> dict:
     """读取 config.json，缺失字段用默认值兜底。"""
-    cfg = _default_config()
-    if CONFIG_FILE.exists():
+    with _config_lock:
+        cfg = _default_config()
+        if CONFIG_FILE.exists():
+            try:
+                data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            except Exception as e:
+                import logging as _logging
+                _logging.getLogger(__name__).warning(f"config.json 解析失败，使用默认配置: {e}")
+                data = {}
+            if isinstance(data, dict):
+                common = data.get("common") or {}
+                if isinstance(common, dict):
+                    if isinstance(common.get("cdp_endpoint"), str):
+                        cfg["common"]["cdp_endpoint"] = common.get("cdp_endpoint")
+                    # 字符串类型的公共配置字段直通
+                    for _str_key in ("chrome_path", "chrome_profile_dir", "download_dir", "operator_name"):
+                        if isinstance(common.get(_str_key), str):
+                            cfg["common"][_str_key] = common[_str_key]
+                    titles = common.get("drama_titles") or []
+                    if isinstance(titles, str):
+                        titles = [x.strip() for x in titles.splitlines() if x.strip()]
+                    if isinstance(titles, list):
+                        seen_titles = set()
+                        norm_titles = []
+                        for title in titles:
+                            title = str(title).strip()
+                            key = re.sub(r"\W+", "", title, flags=re.UNICODE).lower()
+                            if title and key and key not in seen_titles:
+                                seen_titles.add(key)
+                                norm_titles.append(title)
+                        cfg["common"]["drama_titles"] = norm_titles
+                profiles = data.get("profiles") or {}
+                if isinstance(profiles, dict):
+                    for key in ALL_PROFILES:
+                        src = profiles.get(key) or {}
+                        if not isinstance(src, dict):
+                            continue
+                        dst = cfg["profiles"][key]
+                        for f in PROFILE_EDITABLE_FIELDS:
+                            if f in src and src[f] not in (None, ""):
+                                dst[f] = src[f]
+                        groups = src.get("groups")
+                        if isinstance(groups, list):
+                            norm_groups = []
+                            for g in groups:
+                                if not isinstance(g, dict):
+                                    continue
+                                acc = g.get("account_ids") or []
+                                if isinstance(acc, str):
+                                    acc = [x.strip() for x in re.split(r"[\s,]+", acc) if x.strip()]
+                                acc = [str(x).strip() for x in acc if str(x).strip()]
+                                dramas = g.get("dramas") or []
+                                norm_dramas = []
+                                if isinstance(dramas, list):
+                                    for d in dramas:
+                                        if not isinstance(d, dict):
+                                            continue
+                                        mids = d.get("material_ids") or []
+                                        if isinstance(mids, str):
+                                            mids = [x.strip() for x in re.split(r"[\s,]+", mids) if x.strip()]
+                                        mids = [str(x).strip() for x in mids if str(x).strip()]
+                                        norm_dramas.append({
+                                            "name": str(d.get("name", "")).strip(),
+                                            "click": str(d.get("click", "")).strip(),
+                                            "show": str(d.get("show", "")).strip(),
+                                            "video": str(d.get("video", "")).strip(),
+                                            "material_ids": mids,
+                                        })
+                                norm_groups.append({
+                                    "id": g["id"] if "id" in g else None,  # 保留稳定 id，None 表示旧数据待补全
+                                    "account_ids": acc,
+                                    "dramas": norm_dramas,
+                                    "group_name": str(g.get("group_name", "")).strip(),
+                                    "click_url": str(g.get("click_url", "")).strip(),
+                                    "show_url": str(g.get("show_url", "")).strip(),
+                                    "play_url": str(g.get("play_url", "")).strip(),
+                                    "material_ids": [str(x).strip() for x in (g.get("material_ids") or []) if str(x).strip()],
+                                })
+                            # 兼容旧数据：为缺少 id 的 group 按数组顺序补 id
+                            existing_ids = [g["id"] for g in norm_groups if g.get("id") is not None]
+                            next_id = (max(existing_ids) + 1) if existing_ids else 1
+                            for g in norm_groups:
+                                if g["id"] is None:
+                                    g["id"] = next_id
+                                    next_id += 1
+                            dst["groups"] = norm_groups
         try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception as e:
-            import logging as _logging
-            _logging.getLogger(__name__).warning(f"config.json 解析失败，使用默认配置: {e}")
-            data = {}
-        if isinstance(data, dict):
-            common = data.get("common") or {}
-            if isinstance(common, dict):
-                if isinstance(common.get("cdp_endpoint"), str):
-                    cfg["common"]["cdp_endpoint"] = common.get("cdp_endpoint")
-                # 字符串类型的公共配置字段直通
-                for _str_key in ("chrome_path", "download_dir", "operator_name"):
-                    if isinstance(common.get(_str_key), str):
-                        cfg["common"][_str_key] = common[_str_key]
-                titles = common.get("drama_titles") or []
-                if isinstance(titles, str):
-                    titles = [x.strip() for x in titles.splitlines() if x.strip()]
-                if isinstance(titles, list):
-                    seen_titles = set()
-                    norm_titles = []
-                    for title in titles:
-                        title = str(title).strip()
-                        key = re.sub(r"\W+", "", title, flags=re.UNICODE).lower()
-                        if title and key and key not in seen_titles:
-                            seen_titles.add(key)
-                            norm_titles.append(title)
-                    cfg["common"]["drama_titles"] = norm_titles
-            profiles = data.get("profiles") or {}
-            if isinstance(profiles, dict):
-                for key in ALL_PROFILES:
-                    src = profiles.get(key) or {}
-                    if not isinstance(src, dict):
-                        continue
-                    dst = cfg["profiles"][key]
-                    for f in PROFILE_EDITABLE_FIELDS:
-                        if f in src and src[f] not in (None, ""):
-                            dst[f] = src[f]
-                    groups = src.get("groups")
-                    if isinstance(groups, list):
-                        norm_groups = []
-                        for g in groups:
-                            if not isinstance(g, dict):
-                                continue
-                            acc = g.get("account_ids") or []
-                            if isinstance(acc, str):
-                                acc = [x.strip() for x in re.split(r"[\s,]+", acc) if x.strip()]
-                            acc = [str(x).strip() for x in acc if str(x).strip()]
-                            dramas = g.get("dramas") or []
-                            norm_dramas = []
-                            if isinstance(dramas, list):
-                                for d in dramas:
-                                    if not isinstance(d, dict):
-                                        continue
-                                    mids = d.get("material_ids") or []
-                                    if isinstance(mids, str):
-                                        mids = [x.strip() for x in re.split(r"[\s,]+", mids) if x.strip()]
-                                    mids = [str(x).strip() for x in mids if str(x).strip()]
-                                    norm_dramas.append({
-                                        "name": str(d.get("name", "")).strip(),
-                                        "click": str(d.get("click", "")).strip(),
-                                        "show": str(d.get("show", "")).strip(),
-                                        "video": str(d.get("video", "")).strip(),
-                                        "material_ids": mids,
-                                    })
-                            norm_groups.append({
-                                "id": g["id"] if "id" in g else None,  # 保留稳定 id，None 表示旧数据待补全
-                                "account_ids": acc,
-                                "dramas": norm_dramas,
-                                "group_name": str(g.get("group_name", "")).strip(),
-                                "click_url": str(g.get("click_url", "")).strip(),
-                                "show_url": str(g.get("show_url", "")).strip(),
-                                "play_url": str(g.get("play_url", "")).strip(),
-                            })
-                        # 兼容旧数据：为缺少 id 的 group 按数组顺序补 id
-                        existing_ids = [g["id"] for g in norm_groups if g.get("id") is not None]
-                        next_id = (max(existing_ids) + 1) if existing_ids else 1
-                        for g in norm_groups:
-                            if g["id"] is None:
-                                g["id"] = next_id
-                                next_id += 1
-                        dst["groups"] = norm_groups
-    try:
-        wait_scale = cfg["profiles"][next(iter(PROFILES))]["wait_scale"]
-        float(wait_scale)
-    except Exception:
-        pass
-    return cfg
+            wait_scale = cfg["profiles"][next(iter(PROFILES))]["wait_scale"]
+            float(wait_scale)
+        except Exception:
+            pass
+        return cfg
 
 
 def save_config(cfg: dict) -> None:
     """保存 config.json（使用原子写入 + 自动备份）。"""
-    save_json_atomic(CONFIG_FILE, cfg)
+    with _config_lock:
+        save_json_atomic(CONFIG_FILE, cfg)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -174,22 +181,23 @@ def save_build_records(records: dict) -> None:
 
 
 def record_build_success(account_count: int, project_count: int, session_id: str = "") -> None:
-    today = datetime.now().strftime("%Y-%m-%d")
-    records = load_build_records()
-    day = records.get(today) or {"accounts": 0, "projects": 0}
-    # session dedupe：同一次 run_build 调用只计一次，防止中途停止重启后重复累加
-    if session_id:
-        day_sessions = day.get("sessions", [])
-        if session_id in day_sessions:
-            return  # 同 session 已记录，忽略
-        day_sessions.append(session_id)
-        if len(day_sessions) > 50:
-            day_sessions = day_sessions[-50:]
-        day["sessions"] = day_sessions
-    day["accounts"] = day.get("accounts", 0) + account_count
-    day["projects"] = day.get("projects", 0) + project_count
-    records[today] = day
-    save_build_records(records)
+    with _config_lock:
+        today = datetime.now().strftime("%Y-%m-%d")
+        records = load_build_records()
+        day = records.get(today) or {"accounts": 0, "projects": 0}
+        # session dedupe：同一次 run_build 调用只计一次，防止中途停止重启后重复累加
+        if session_id:
+            day_sessions = day.get("sessions", [])
+            if session_id in day_sessions:
+                return  # 同 session 已记录，忽略
+            day_sessions.append(session_id)
+            if len(day_sessions) > 50:
+                day_sessions = day_sessions[-50:]
+            day["sessions"] = day_sessions
+        day["accounts"] = day.get("accounts", 0) + account_count
+        day["projects"] = day.get("projects", 0) + project_count
+        records[today] = day
+        save_build_records(records)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -209,14 +217,15 @@ def save_material_history(history: list) -> None:
 def add_material_history(names: list[str]) -> None:
     if not names:
         return
-    history = load_material_history()
-    existing = {r["name"] for r in history}
-    date_tag = datetime.now().strftime("%m%d")
-    for name in names:
-        if name and name not in existing:
-            history.insert(0, {"date": date_tag, "name": name})
-            existing.add(name)
-    save_material_history(history)
+    with _config_lock:
+        history = load_material_history()
+        existing = {r["name"] for r in history}
+        date_tag = datetime.now().strftime("%m%d")
+        for name in names:
+            if name and name not in existing:
+                history.insert(0, {"date": date_tag, "name": name})
+                existing.add(name)
+        save_material_history(history)
 
 
 def get_used_material_names() -> set:

@@ -17,6 +17,33 @@
         <label class="field-label" for="juming-account-ids">账户 ID（每行一个）</label>
         <textarea id="juming-account-ids" v-model="accountIds" class="input-area" rows="4" placeholder="输入账户ID，每行一个"></textarea>
 
+        <div class="pool-picker-bar">
+          <button class="btn btn-ghost btn-sm" @click="showPoolPicker = !showPoolPicker">
+            📋 从账户池顺序选取
+            <span v-if="showPoolPicker">▲</span><span v-else>▼</span>
+          </button>
+          <div v-if="showPoolPicker" class="pool-picker-panel">
+            <p class="pool-hint">按轮转顺序选取：优先未用过的账户，其次最久未使用的。选取后自动标记已用，下次从后续账户开始。</p>
+            <div class="pool-row">
+              <select v-model="poolProfileKey" class="param-input pool-select">
+                <option value="安卓-每留">安卓-每留</option>
+                <option value="安卓-七留">安卓-七留</option>
+                <option value="IOS-每留">IOS-每留</option>
+                <option value="IOS-七留">IOS-七留</option>
+              </select>
+              <label class="pool-label">组数</label>
+              <input v-model.number="poolNumGroups" type="number" class="param-input pool-num" min="1" max="20" />
+              <label class="pool-label">每组</label>
+              <input v-model.number="poolGroupSize" type="number" class="param-input pool-num" min="1" max="20" />
+              <span class="pool-calc">= {{ poolNumGroups * poolGroupSize }} 个账户</span>
+              <button class="btn btn-primary btn-sm" @click="pickFromPool" :disabled="poolLoading">
+                {{ poolLoading ? '选取中...' : '选取' }}
+              </button>
+            </div>
+            <p v-if="poolStatus" class="pool-status" :class="poolStatus.startsWith('✅') ? 'status-ok' : poolStatus.startsWith('⚠') ? 'status-warn' : 'status-err'">{{ poolStatus }}</p>
+          </div>
+        </div>
+
         <label class="field-label" for="juming-drama-data">短剧数据（剧名+链接，空行分隔各组）</label>
         <textarea id="juming-drama-data" v-model="dramaData" class="input-area" rows="6" placeholder="剧名&#10;点击监测链接&#10;展示监测链接&#10;视频播放监测链接&#10;&#10;下一部剧..."></textarea>
 
@@ -94,7 +121,7 @@
 
 <script setup>
 import { ref, watch, onMounted } from 'vue'
-import { batchAssign, getDramaTitles, appendDramaTitles, addResultToProfile } from '@/services/api'
+import { batchAssign, getDramaTitles, appendDramaTitles, addResultToProfile, selectPoolAccounts } from '@/services/api'
 import { useUiStore } from '@/stores/ui'
 
 const uiStore = useUiStore()
@@ -189,6 +216,42 @@ onMounted(() => {
   }
 })
 
+// Pool picker state
+const showPoolPicker = ref(false)
+const poolProfileKey = ref('安卓-每留')
+const poolNumGroups = ref(1)
+const poolGroupSize = ref(5)
+const poolLoading = ref(false)
+const poolStatus = ref('')
+
+async function pickFromPool() {
+  poolLoading.value = true
+  poolStatus.value = ''
+  try {
+    const groupSize = poolGroupSize.value || 5
+    const res = await selectPoolAccounts(poolProfileKey.value, poolNumGroups.value, groupSize)
+    if (res.ok) {
+      const allIds = res.groups.flat()
+      if (allIds.length === 0) {
+        poolStatus.value = '⚠ 账户池中没有匹配的可用账户'
+        return
+      }
+      // 直接替换（顺序选取，每次都是新的一批）
+      accountIds.value = allIds.join('\n')
+      poolStatus.value = `✅ 已顺序选取 ${allIds.length} 个账户（${res.groups.length} 组 × ${groupSize} 个），池中共 ${res.total_available} 个`
+      if (res.warning) {
+        poolStatus.value += `\n⚠ ${res.warning}`
+      }
+    } else {
+      poolStatus.value = `❌ ${res.error || '选取失败'}`
+    }
+  } catch (e) {
+    poolStatus.value = `❌ ${e.message}`
+  } finally {
+    poolLoading.value = false
+  }
+}
+
 const profileKeys = [
   '安卓-每留', '安卓-七留', 'IOS-每留', 'IOS-七留',
   '安卓-激励每留', '安卓-激励七留'
@@ -216,9 +279,9 @@ async function addToProfile(profileKey) {
 .view-desc { font-size: 13px; color: var(--c-dim); }
 
 .tab-bar { display: flex; gap: 4px; margin-bottom: 16px; background: var(--c-surface); border-radius: var(--r-sm); padding: 3px; width: fit-content; }
-.tab-btn { padding: 7px 20px; border: none; border-radius: 6px; font-size: 13px; font-weight: 600; font-family: var(--f-ui); color: var(--c-text-2); background: transparent; cursor: pointer; transition: all var(--transition-fast); }
+.tab-btn { padding: 7px 20px; border: none; border-radius: var(--r-sm); font-size: 13px; font-weight: 600; font-family: var(--f-ui); color: var(--c-text-2); background: transparent; cursor: pointer; transition: all var(--transition-fast); }
 .tab-btn:hover { background: var(--c-hover); }
-.tab-btn.active { background: var(--c-card); color: var(--c-text); box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+.tab-btn.active { background: var(--c-card); color: var(--c-text); box-shadow: 0 1px 4px rgba(0,0,0,0.40); }
 
 .field-label { display: block; font-size: 12px; font-weight: 600; color: var(--c-text-2); margin: 14px 0 6px; }
 .input-area { width: 100%; padding: 10px 14px; border: 1px solid var(--c-border); border-radius: var(--r-sm); font-family: var(--f-mono); font-size: 12px; resize: vertical; background: var(--c-card); color: var(--c-text); outline: none; transition: border-color var(--transition-fast); }
@@ -259,4 +322,16 @@ async function addToProfile(profileKey) {
 }
 .status-ok { color: var(--c-green); }
 .status-err { color: var(--c-red); }
+
+.pool-picker-bar { margin-top: 6px; }
+.pool-picker-panel { margin-top: 8px; padding: 10px 14px; background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--r-sm); }
+.pool-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pool-select { width: 120px; }
+.pool-num { width: 60px; }
+.pool-label { font-size: 11px; color: var(--c-dim); font-weight: 600; }
+.pool-hint { font-size: 11px; color: var(--c-dim); margin: 0 0 8px; line-height: 1.5; }
+.pool-calc { font-size: 12px; color: var(--c-text-2); font-family: var(--f-mono); }
+.pool-status { font-size: 12px; margin-top: 8px; white-space: pre-line; }
+.status-warn { color: var(--c-yellow, #e6a700); }
+.btn-sm { padding: 5px 12px; font-size: 12px; }
 </style>

@@ -353,6 +353,7 @@ def profile_groups_from_config(cfg: dict, profile_key: str):
                 "click_url": g.get("click_url", ""),
                 "show_url": g.get("show_url", ""),
                 "play_url": g.get("play_url", ""),
+                "material_ids": [str(x).strip() for x in (g.get("material_ids") or []) if str(x).strip()],
             }
             if ids:
                 out.append((ids, [], meta))

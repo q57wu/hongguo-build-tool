@@ -47,8 +47,9 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { ref, watch } from 'vue'
 import { rtaSet, stopRtaSet, rtaCheck, stopRtaCheck } from '@/services/api'
+import { useToolLogger } from '../composables/useToolLogger'
 
 const dramaOptions = [
   { value: '1', label: '常规剧' },
@@ -58,14 +59,14 @@ const dramaOptions = [
 
 const dramaType = ref(localStorage.getItem('rta_dramaType') || '1')
 const aadvidsText = ref(localStorage.getItem('rta_aadvids') || '')
-const running = ref(false)
 const currentAction = ref('')
-const logs = ref([])
-const logBox = ref(null)
-const autoScroll = ref(true)
 
 watch(dramaType, (v) => localStorage.setItem('rta_dramaType', v))
 watch(aadvidsText, (v) => localStorage.setItem('rta_aadvids', v))
+
+const { logs, running, logBox } = useToolLogger({
+  onDone() { currentAction.value = '' }
+})
 
 function parseAadvids() {
   return aadvidsText.value.split('\n').map(s => s.trim()).filter(Boolean)
@@ -77,35 +78,6 @@ function lineClass(line) {
   if (line.includes('⚠️') || line.includes('未启用') || line.includes('未传入')) return 'log-warn'
   return ''
 }
-
-function onLogScroll() {
-  if (!logBox.value) return
-  const el = logBox.value
-  autoScroll.value = el.scrollHeight - el.scrollTop - el.clientHeight < 40
-}
-
-function onToolLog(e) {
-  logs.value.push(e.detail.message)
-  if (autoScroll.value) {
-    nextTick(() => { if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight })
-  }
-}
-
-function onToolDone() {
-  running.value = false
-  currentAction.value = ''
-}
-
-onMounted(() => {
-  window.addEventListener('honguo:tool-log', onToolLog)
-  window.addEventListener('honguo:tool-done', onToolDone)
-  if (logBox.value) logBox.value.addEventListener('scroll', onLogScroll)
-})
-onUnmounted(() => {
-  window.removeEventListener('honguo:tool-log', onToolLog)
-  window.removeEventListener('honguo:tool-done', onToolDone)
-  if (logBox.value) logBox.value.removeEventListener('scroll', onLogScroll)
-})
 
 async function startSet() {
   const ids = parseAadvids()
@@ -143,11 +115,11 @@ async function stopCurrent() {
 .input-area { width: 100%; padding: 10px 14px; border: 1px solid var(--c-border); border-radius: var(--r-sm); font-family: var(--f-mono); font-size: 12px; resize: vertical; background: var(--c-card); color: var(--c-text); outline: none; box-sizing: border-box; }
 .input-area:focus { border-color: var(--c-primary); }
 .btn-row { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
-.btn-check { background: #0891b2; }
-.btn-check:hover:not(:disabled) { background: #0e7490; }
+.btn-check { background: var(--c-teal); }
+.btn-check:hover:not(:disabled) { background: var(--c-teal-h); }
 .status-tag { display: inline-block; font-size: 11px; font-weight: 600; padding: 3px 10px; border-radius: 10px; margin-top: 12px; }
 .status-idle { background: var(--c-surface); color: var(--c-dim); }
-.status-running { background: #ecfdf5; color: #065f46; }
+.status-running { background: var(--c-status-success-bg); color: var(--c-status-success-text); }
 .log-box { margin-top: 12px; background: var(--c-log-bg); border-radius: var(--r-md); padding: 14px; max-height: 350px; overflow-y: auto; font-family: var(--f-mono); font-size: 12px; line-height: 1.7; color: var(--c-log-fg); user-select: text; -webkit-user-select: text; cursor: text; }
 .log-line { padding: 1px 0; }
 .log-empty { color: var(--c-log-dim); }

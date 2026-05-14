@@ -12,6 +12,87 @@
   <img src="https://raw.githubusercontent.com/q57wu/hongguo-build-tool/main/assets/screenshots/main.png" alt="主界面" width="720">
 </div>
 
+## 快速开始
+
+> 从下载到第一次搭建，只需 5 步，全程约 10 分钟。
+
+### 第 1 步：下载 exe
+
+前往 [Releases 页面](https://github.com/q57wu/hongguo-build-tool/releases/latest)，下载 **`红果搭建工具.exe`**（约 61 MB）。
+
+将 exe 放到一个**英文路径、无空格**的文件夹中，例如：
+```
+D:\HongGuo\红果搭建工具.exe
+```
+
+> 首次双击运行时，软件会在 exe 旁边**自动生成**所有必要文件：
+> ```
+> D:\HongGuo\
+> ├── 红果搭建工具.exe      ← 你下载的
+> ├── config.json           ← 自动生成的默认配置
+> ├── frontend/dist/        ← 自动释放的前端界面
+> ├── data/                 ← 账户池数据库
+> ├── config_backups/       ← 配置自动备份
+> └── 数据/                 ← 各模式的数据模板
+>     ├── 安卓/搭建/每留/ids.txt
+>     ├── 安卓/搭建/七留/ids.txt
+>     ├── IOS/每留/ids.txt
+>     ├── IOS/七留/ids.txt
+>     └── 激励/安卓搭建/...
+> ```
+> **无需手动创建任何文件夹或配置文件。**
+
+### 第 2 步：启动 Chrome 调试模式
+
+搭建工具通过 Chrome DevTools Protocol (CDP) 控制浏览器，需要先以调试端口启动 Chrome。
+
+**方法 A**：手动启动（推荐首次使用）
+```bash
+# 在命令行运行（注意替换为你的 Chrome 路径）
+"C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
+```
+
+**方法 B**：在工具的「设置」页面配置 Chrome 路径，之后由工具自动启动。
+
+> Chrome 启动后，先手动登录巨量创量平台（https://agent.oceanengine.com），确保登录态正常。
+
+### 第 3 步：配置投放参数
+
+双击 `红果搭建工具.exe` 打开软件，进入 **「设置」** 页面：
+
+1. **基础配置**
+   - 填写操作人名称
+   - 确认 CDP 地址为 `http://localhost:9222`（默认值）
+
+2. **模式配置**（以「安卓-每留」为例）
+   - 策略名：如 `安卓-每留`
+   - 素材账户 ID：你的素材账户
+   - 定向包关键词：如 `红果通用`
+
+3. **导入剧单**
+   - 在每个模式下添加账户分组
+   - 为每个分组配置：投放账户 ID、剧名、监测链接（展示/点击/播放）、素材 ID
+
+### 第 4 步：开始搭建
+
+回到 **「搭建控制台」** 首页：
+
+1. 选择投放模式（安卓-每留 / 安卓-七留 / iOS-每留 / iOS-七留 / 激励模式）
+2. 选择搭建方式：
+   - **串行搭建**：逐个账户依次执行，稳定可靠
+   - **并行搭建**：多 Tab 同时执行，效率翻倍（可设置并发数 2-10）
+3. 点击 **「开始搭建」**
+4. 在日志面板实时查看搭建进度
+
+### 第 5 步：查看结果
+
+搭建完成后：
+- **搭建记录**：在「记录」页查看每次搭建的详情（成功/失败/跳过）
+- **每日任务**：在「每日任务」页追踪当日搭建进度
+- **CSV 导出**：点击「导出」按钮下载搭建详情表格
+
+---
+
 ## 功能特性
 
 ### 核心搭建
@@ -20,6 +101,7 @@
 - **激励视频搭建**：安卓-激励每留 / 安卓-激励七留
 - **批量自动化**：一键完成从策略选择到审核提交的全流程
 - **差异化搭建**：按账户分组 × 剧名组合，实现多维度差异化投放
+- **并行搭建**：多 Tab 并行调度器，同时开启多个 popup 并行执行搭建流程
 - **断点续传**：支持中断后自动恢复未完成任务
 
 ### 素材管理
@@ -29,6 +111,15 @@
 - **素材推送**：将素材批量推送到指定投放账户
 - **素材爬取**：自动爬取符合条件的素材 ID 列表
 - **历史记录**：完整的素材使用历史追溯
+- **并行素材协调**：PageCoordinator 多 worker 分区扫描、共享去重、环绕扫描
+
+### 账户池管理
+
+- **双池架构**：普通池 + 激励池独立管理
+- **批量导入**：文本粘贴导入、从配置一键导入
+- **标签筛选**：按标签分类管理账户
+- **使用追踪**：自动记录账户最近使用时间
+- **链接分配集成**：激励链接分配页可直接从账户池选取
 
 ### 监测链接
 
@@ -47,7 +138,8 @@
 - **RTA 批量设置**：快速配置 RTA 生效范围
 - **RTA 状态检测**：批量检测 RTA 启用状态
 - **每日任务管理**：创建和追踪每日搭建任务
-- **搭建记录统计**：账户数、项目数等数据汇总
+- **搭建详情记录**：逐账户记录成功/失败/跳过，支持 CSV 导出
+- **配置备份管理**：自动备份、一键恢复、删除
 
 ## 技术架构
 
@@ -81,15 +173,15 @@
 ## 环境要求
 
 - **操作系统**：Windows 10 / 11
-- **Python**：3.10+
 - **浏览器**：Chrome（需以调试端口模式启动）
+- **Python**：3.10+（仅源码运行需要）
 - **Node.js**：16+（仅开发模式需要）
 
 ## 安装
 
-### 方式一：直接运行（推荐）
+### 方式一：下载 exe 直接运行（推荐）
 
-下载 [Releases](https://github.com/q57wu/hongguo-build-tool/releases) 中的打包版本，双击 `红果搭建工具.exe` 即可使用。
+前往 [Releases](https://github.com/q57wu/hongguo-build-tool/releases/latest) 下载 `红果搭建工具.exe`，放到任意文件夹，双击即可运行。首次启动会自动生成所有必要文件，无需额外操作。
 
 ### 方式二：源码运行
 
@@ -100,63 +192,15 @@ cd hongguo-build-tool
 
 # 2. 安装 Python 依赖
 pip install -r requirements.txt
-pip install pywebview
 
-# 3. 安装 Playwright 浏览器（可选，用于自带浏览器）
-playwright install chromium
-
-# 4. 安装前端依赖并构建
+# 3. 安装前端依赖并构建
 cd frontend
 npm install
 npm run build
 cd ..
 
-# 5. 启动
+# 4. 启动
 python app.py
-```
-
-## 使用说明
-
-### 1. 启动 Chrome 调试模式
-
-```bash
-chrome.exe --remote-debugging-port=9222
-```
-
-或在工具的设置页面配置 Chrome 路径后，由工具自动启动。
-
-### 2. 配置投放参数
-
-在设置页面完成：
-- 操作人名称
-- 各模式的策略名、素材账户、定向包关键词
-- 导入剧单及对应监测链接
-
-### 3. 开始搭建
-
-1. 选择投放模式（安卓-每留 / 安卓-七留 / iOS-每留 / iOS-七留）
-2. 确认账户分组与剧名配置
-3. 点击"开始搭建"
-4. 实时查看日志与进度
-5. 搭建完成后查看统计
-
-### 数据格式参考
-
-```
-账户ID1
-账户ID2
-
-剧名
-
-展示监测链接
-点击监测链接
-视频播放监测链接
-
-素材ID1 素材ID2 素材ID3
-
-===
-
-（下一组，用 === 分隔）
 ```
 
 ## 开发
@@ -174,19 +218,42 @@ set DEV=1 && python app.py
 
 ```
 ├── app.py                 # 主入口（pywebview 窗口）
-├── start.py               # 启动脚本
+├── build_exe.spec         # PyInstaller 打包配置
 ├── backend/               # 后端逻辑
 │   ├── api.py             # JS Bridge API
 │   ├── bridge.py          # 事件桥接
 │   ├── build_engine.py    # 搭建引擎
-│   ├── core/              # 核心业务（搭建步骤、推广链等）
-│   ├── services/          # 服务层（浏览器、进度、任务）
-│   ├── tools/             # RTA 等工具
+│   ├── build_adapter.py   # 搭建适配器（串行/并行分发）
+│   ├── config_manager.py  # 配置管理
+│   ├── tool_adapter.py    # 工具适配器（推广链/素材/RTA）
+│   ├── task_registry.py   # 任务注册表
+│   ├── core/              # 核心业务
+│   │   ├── build_steps.py        # 普通搭建 8 步流程
+│   │   ├── incentive_steps.py    # 激励搭建步骤
+│   │   ├── material_ops.py       # 素材操作（翻页、选取）
+│   │   ├── parallel_build.py     # 普通并行搭建
+│   │   ├── parallel_build_incentive.py  # 激励并行搭建 + PageCoordinator
+│   │   ├── config_io.py          # 配置文件读写
+│   │   ├── constants.py          # 全局常量
+│   │   └── ...
+│   ├── services/          # 服务层
+│   │   ├── account_pool.py       # 账户池（SQLite）
+│   │   ├── browser_service.py    # Chrome CDP 连接
+│   │   ├── build_detail_service.py  # 搭建详情记录
+│   │   ├── crawl_material.py     # 素材爬取
+│   │   └── ...
+│   ├── selectors/         # 选择器配置（oceanengine.json）
+│   ├── tools/             # RTA 工具
 │   └── utils/             # 工具函数
+│       ├── diagnostics.py        # 页面结构诊断
+│       ├── error_format.py       # 错误信息友好化
+│       ├── file_utils.py         # 文件操作
+│       └── ...
 ├── frontend/              # Vue 3 前端
 │   ├── src/
 │   │   ├── views/         # 页面组件
 │   │   ├── stores/        # Pinia 状态管理
+│   │   ├── components/    # 通用组件
 │   │   ├── services/      # API 调用层
 │   │   └── composables/   # 组合式函数
 │   └── vite.config.js
@@ -199,6 +266,23 @@ set DEV=1 && python app.py
 [MIT License](LICENSE)
 
 ## 更新日志
+
+### v0.4（2026-05-14）
+
+- 新增账户池管理：SQLite 双池架构，批量导入、标签筛选、使用追踪
+- 新增搭建详情记录：逐账户记录成功/失败/跳过，支持 CSV 导出
+- 新增配置备份管理：自动备份、一键恢复、删除
+- 新增分配操作日志、Toast 全局通知、断点续传进度 UI
+- 并行激励搭建优化：PageCoordinator 分区扫描、页面互斥、共享素材去重、环绕扫描
+- 全面深色工业风主题改版
+- 错误信息友好化、配置读写线程安全、每日任务原子写入
+
+### v0.3（2026-05-08）
+
+- 新增多 Tab 并行搭建模式，搭建效率大幅提升
+- 可配置并发数，串行/并行一键切换
+- 激励按组并行，普通按剧并行
+- 线程安全调度（ThreadPoolExecutor + Lock）
 
 ### v0.2（2026-05-05）
 

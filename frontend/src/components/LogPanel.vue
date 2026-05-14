@@ -7,6 +7,7 @@
         <span class="log-count" v-if="logStore.logs.length">{{ logStore.logs.length }} 条</span>
       </div>
       <div class="log-actions">
+        <button class="log-btn" @click="dumpStructure" title="打印当前网页结构" :disabled="dumping">结构</button>
         <button class="log-btn" @click="copyLogs" title="复制">📋</button>
         <button class="log-btn" @click="logStore.clear()" title="清空">🗑️</button>
         <button class="log-btn" @click="isExpanded = !isExpanded"
@@ -21,7 +22,7 @@
     <div class="log-body" ref="logBody">
       <div v-if="logStore.logs.length === 0" class="log-empty">
         <span class="log-empty-icon">📝</span>
-        <span>等待运行日志...</span>
+        <span>点击「开始搭建」后，日志将在此显示</span>
       </div>
       <div
         v-for="entry in logStore.logs"
@@ -39,11 +40,13 @@
 <script setup>
 import { ref, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useLogStore } from '../stores/log'
+import { dumpPageStructure } from '../services/api'
 
 const logStore = useLogStore()
 const logBody = ref(null)
 const isExpanded = ref(false)
 const autoScroll = ref(true)
+const dumping = ref(false)
 
 // 检测用户是否手动上滑：如果滚动位置离底部超过 40px 则关闭自动滚动
 function onScroll() {
@@ -86,6 +89,22 @@ function isBanner(msg) {
   return /[╔╚╗╝┌└┐┘│║]/.test(msg) || /^[\s\n]*(🎬|📦)/.test(msg)
 }
 
+async function dumpStructure() {
+  if (dumping.value) return
+  dumping.value = true
+  logStore.append({ message: '[结构诊断] 正在打印当前网页结构...', level: 'warn' })
+  try {
+    const res = await dumpPageStructure()
+    if (!res?.ok) {
+      logStore.append({ message: `❌ 网页结构诊断失败: ${res?.error || '未知错误'}`, level: 'error' })
+    }
+  } catch (e) {
+    logStore.append({ message: `❌ 网页结构诊断失败: ${e.message || e}`, level: 'error' })
+  } finally {
+    dumping.value = false
+  }
+}
+
 function copyLogs() {
   const text = logStore.logs.map(e => `[${formatTime(e.time)}] ${e.message}`).join('\n')
   navigator.clipboard.writeText(text)
@@ -97,7 +116,8 @@ function copyLogs() {
   flex: 1;
   min-height: 200px;
   margin-top: 12px;
-  background: var(--c-log-bg);
+  background: var(--c-bg);
+  border: 1px solid var(--c-border-s);
   border-radius: var(--r-lg);
   display: flex;
   flex-direction: column;
@@ -108,7 +128,7 @@ function copyLogs() {
 .log-panel.expanded {
   position: fixed;
   top: max(20px, env(safe-area-inset-top, 20px));
-  left: 240px;
+  left: 220px;
   right: 20px;
   bottom: 20px;
   z-index: 100;
@@ -121,7 +141,8 @@ function copyLogs() {
   justify-content: space-between;
   align-items: center;
   padding: 12px 16px;
-  border-bottom: 1px solid rgba(255,255,255,0.06);
+  border-bottom: 1px solid var(--c-border-s);
+  background: var(--c-card);
   flex-shrink: 0;
 }
 
@@ -134,13 +155,14 @@ function copyLogs() {
 .log-title {
   font-size: 12px;
   font-weight: 600;
-  color: var(--c-log-fg);
+  color: var(--c-text);
+  font-family: var(--f-ui);
 }
 
 .log-count {
-  font-size: 10px;
-  color: var(--c-log-dim);
-  background: rgba(255,255,255,0.06);
+  font-size: 11px;
+  color: var(--c-dim);
+  background: rgba(36, 51, 82, 0.6);
   padding: 2px 8px;
   border-radius: 10px;
 }
@@ -156,14 +178,15 @@ function copyLogs() {
   padding: 4px 6px;
   border-radius: 4px;
   cursor: pointer;
-  font-size: 13px;
-  opacity: 0.6;
-  transition: opacity 0.15s;
+  font-size: 12px;
+  color: var(--c-text-2);
+  opacity: 0.7;
+  transition: opacity 0.15s, background 0.15s;
 }
 
 .log-btn:hover {
   opacity: 1;
-  background: rgba(255,255,255,0.06);
+  background: rgba(36, 51, 82, 0.6);
 }
 
 .log-body {
@@ -172,7 +195,7 @@ function copyLogs() {
   padding: 8px 16px;
   font-family: var(--f-mono);
   font-size: 12px;
-  line-height: 1.7;
+  line-height: 1.55;
   user-select: text;
   -webkit-user-select: text;
   cursor: text;
@@ -184,7 +207,7 @@ function copyLogs() {
   align-items: center;
   justify-content: center;
   height: 100%;
-  color: var(--c-log-dim);
+  color: var(--c-dim);
   font-family: var(--f-ui);
   gap: 8px;
 }
@@ -201,18 +224,18 @@ function copyLogs() {
 }
 
 .log-time {
-  color: var(--c-log-dim);
+  color: var(--c-dim);
   flex-shrink: 0;
   font-size: 11px;
 }
 
 .log-msg {
-  color: var(--c-log-fg);
+  color: var(--c-text-2);
   word-break: break-all;
 }
 
 /* 日志级别颜色 */
-.log-info .log-msg { color: var(--c-log-fg); }
+.log-info .log-msg { color: var(--c-text-2); }
 .log-success .log-msg { color: var(--c-green); }
 .log-warn .log-msg { color: var(--c-orange); }
 .log-error .log-msg { color: var(--c-red); }
@@ -224,7 +247,7 @@ function copyLogs() {
   white-space: pre;
 }
 .log-banner .log-msg {
-  color: #7dd3fc;
+  color: var(--c-accent);
   font-weight: 600;
   font-size: 12.5px;
   letter-spacing: 0.02em;
@@ -244,7 +267,7 @@ function copyLogs() {
   background: transparent;
 }
 .log-body::-webkit-scrollbar-thumb {
-  background: rgba(255,255,255,0.1);
+  background: rgba(36, 51, 82, 0.8);
   border-radius: 3px;
 }
 </style>

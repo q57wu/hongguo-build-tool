@@ -27,6 +27,8 @@ from backend.core.constants import (
     StopRequested,
 )
 
+from backend.utils.error_format import friendly_error
+
 # ── 已迁移至独立模块的稳定符号 ──
 from backend.core.playwright_utils import (
     safe_click, wait_small, wait_idle, wait_loading_gone,
@@ -37,7 +39,7 @@ from backend.core.playwright_utils import (
     wait_locator_ready, safe_select_option,
 )
 from backend.core.logging_utils import setup_logger, fmt_duration
-from backend.core.constants import TODAY_STR
+from backend.core.constants import get_today_str
 import uuid
 from backend.core.config_io import (
     load_config, record_build_success,
@@ -52,6 +54,8 @@ from backend.core.data_parsers import (
 # ── 异常处理（已迁移）──
 from backend.core.exceptions import check_stop
 from backend.utils.win_focus import capture_foreground, restore_foreground
+from backend.services.build_progress import save_progress, clear_progress, create_task_id
+from backend.services.build_detail_service import add_build_detail
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -67,9 +71,7 @@ def step_select_strategy(popup, cfg, logger, W):
     except Exception as e:
         logger.warning(f"step_select_strategy 获取按钮数量失败: {e}")
     safe_click(popup, strategy_buttons.first, timeout=15_000, desc="选择策略按钮", logger=logger, W=W)
-    wait_small(popup, W.MEDIUM)
     strategy_dlg = get_visible_layer(popup, desc="策略弹窗", timeout=15_000, logger=logger, W=W)
-    wait_small(popup, W.LOAD)
 
     rows = strategy_dlg.locator("tbody tr.el-table__row, tbody tr, .el-table__row, tr")
     strategy_row = None
@@ -99,8 +101,8 @@ def step_select_strategy(popup, cfg, logger, W):
         try:
             snapshot = re.sub(r"\s+", " ", strategy_dlg.inner_text(timeout=2_000)).strip()
             logger.warning(f"⚠️ 策略弹窗内容片段：{snapshot[:500]}")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"获取策略弹窗内容失败: {e}")
         raise Exception(f"❌ 未找到策略: {strategy_name}")
 
     strategy_row.wait_for(state="visible", timeout=TIMEOUT)
@@ -113,7 +115,6 @@ def step_select_strategy(popup, cfg, logger, W):
 
 def step_select_media_accounts(popup, ids, cfg, logger, W):
     popup.locator("div.selector:has(label:has-text('媒体账户')) button:has-text('更改')").click()
-    wait_small(popup, W.LOAD)
     popup.locator("div.selected-card-header").first.wait_for(state="visible", timeout=TIMEOUT)
     popup.locator("div.selected-card-header button:has-text('清空')").first.click(force=True)
     wait_small(popup, W.MEDIUM)
@@ -156,7 +157,6 @@ def step_select_media_accounts(popup, ids, cfg, logger, W):
 
     dlg_acc.locator("thead label.el-checkbox").first.click(force=True)
     click_top_confirm(popup, dlg_acc, desc="媒体账户确认", wait_close=True, logger=logger, W=W)
-    wait_small(popup, W.LOAD)
     try: dlg_acc.wait_for(state="hidden", timeout=10_000)
     except Exception as e:
         logger.warning(f"step_select_media_accounts 等待对话框关闭失败: {e}")
@@ -381,7 +381,7 @@ def _pick_materials_by_keyword(popup, drama_name, cfg, logger, W):
     _configure_material_filters(popup, pane, material_dlg, logger, W)
     available_candidates = _collect_material_candidates(
         popup, material_dlg, pane, drama_name, logger, W,
-        is_valid_material_name, extract_mmdd, fmt_duration, TODAY_STR,
+        is_valid_material_name, extract_mmdd, fmt_duration, get_today_str(),
     )
     if not available_candidates:
         logger.warning(f"⚠️ 未找到可用素材: {drama_name}")
@@ -397,6 +397,8 @@ def _pick_materials_by_keyword(popup, drama_name, cfg, logger, W):
 def _pick_materials_by_ids(popup, drama_name, material_ids, cfg, logger, W):
     from backend.core.material_ops import (
         _open_material_dialog,
+        _get_material_list_wrapper,
+        _select_media_material_tab,
     )
     material_dlg, pane = _open_material_dialog(popup, drama_name, cfg, logger, W, use_keyword=False)
     try:
@@ -435,13 +437,13 @@ def _pick_materials_by_ids(popup, drama_name, material_ids, cfg, logger, W):
             popup.keyboard.press("Enter")
         wait_small(popup, W.MEDIUM)
         logger.info(f"✅ 已逐行输入 {len(material_ids)} 个素材ID")
-    old_material_count = pane.locator("div.material-item").count()
+    old_material_count = _get_material_list_wrapper(pane).locator("div.material-item").count()
     safe_click(popup, popup.locator("button.el-button--primary:visible").filter(has_text="搜索").last, desc="搜索素材ID", logger=logger, W=W)
     wait_small(popup, W.SEARCH)
     material_dlg = popup.locator("div.el-dialog:visible").last
     material_dlg.wait_for(state="visible", timeout=TIMEOUT)
-    pane = material_dlg.locator("#pane-account-material")
-    material_wrapper = pane.locator("div.material-wrapper").first
+    pane = _select_media_material_tab(popup, material_dlg, logger, W)
+    material_wrapper = _get_material_list_wrapper(pane)
     material_wrapper.wait_for(state="visible", timeout=TIMEOUT)
     expected_count = len(material_ids)
     load_deadline = time.time() + 60
@@ -459,7 +461,7 @@ def _pick_materials_by_ids(popup, drama_name, material_ids, cfg, logger, W):
                 stable_count = -1
                 wait_small(popup, W.LONG)
                 continue
-        current_count = pane.locator("div.material-item").count()
+        current_count = material_wrapper.locator("div.material-item").count()
         if current_count == expected_count and current_count > 0:
             refreshed = True
             break
@@ -481,7 +483,7 @@ def _pick_materials_by_ids(popup, drama_name, material_ids, cfg, logger, W):
         return 0
     wait_loading_gone(popup, material_wrapper)
     wait_small(popup, W.NORMAL)
-    cards = pane.locator("div.material-item")
+    cards = material_wrapper.locator("div.material-item")
     total = cards.count()
     picked = 0
     for i in range(total):
@@ -489,8 +491,8 @@ def _pick_materials_by_ids(popup, drama_name, material_ids, cfg, logger, W):
             safe_click(popup, cards.nth(i), desc=f"素材卡片{i+1}/{total}", logger=logger, W=W)
             wait_small(popup, W.TINY)
             picked += 1
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"素材卡片{i+1}点击失败: {e}")
     if picked == 0:
         cancel_btn = material_dlg.locator("button:visible").filter(has_text="取消").last
         if cancel_btn.count() > 0:
@@ -668,8 +670,8 @@ def step_submit_and_close(popup, page, logger, W):
                 _bg_check = popup.locator("button:has-text('转为后台提交')").first
                 _bg_check.wait_for(state="visible", timeout=3_000)
                 _dlg_closed = True
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"后台提交按钮检查超时: {e}")
         if not _dlg_closed:
             # 最后 fallback：短暂等待后继续（不再用 .last 等隐藏，避免并行干扰）
             wait_small(popup, 2000)
@@ -684,8 +686,8 @@ def step_submit_and_close(popup, page, logger, W):
         logger.error('❌ 未确认提交（未出现"转为后台提交"按钮），本剧搭建失败')
         try:
             popup.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"关闭弹窗失败: {e}")
         raise BuildSubmitError('未出现"转为后台提交"按钮，提交结果不确定，视为搭建失败')
     safe_click(popup, bg_btn, desc="转为后台提交", logger=logger, W=W)
     wait_small(popup, W.LOAD)
@@ -700,12 +702,13 @@ def step_submit_and_close(popup, page, logger, W):
 #  主运行函数（参数化）
 # ═══════════════════════════════════════════════════════════════
 
-def run_build(profile_key: str, log_callback=None, stop_event=None):
+def run_build(profile_key: str, log_callback=None, stop_event=None, progress_callback=None, **kwargs):
     """
     执行搭建流程。
     profile_key: PROFILES 中的 key
     log_callback: 可选，接收 (str) 的回调，用于 GUI 日志显示
     stop_event: threading.Event，外部可设置以中止
+    progress_callback: 可选，接收 (step: int, total: int, message: str) 的回调，用于进度条更新
     """
     app_cfg = load_config()
     cfg = build_runtime_profile_config(profile_key, app_cfg)
@@ -746,6 +749,7 @@ def run_build(profile_key: str, log_callback=None, stop_event=None):
     total_projects = 0
     success_account_ids = set()
     session_id = str(uuid.uuid4())
+    task_id = create_task_id(profile_key)
 
     groups = profile_groups_from_config(app_cfg, profile_key)
     if groups:
@@ -755,6 +759,10 @@ def run_build(profile_key: str, log_callback=None, stop_event=None):
         groups = read_data(cfg["ids_file"], logger)
     if not groups:
         logger.error("❌ 没有读取到任何数据（请打开「⚙ 设置」录入账号 ID / 链接 / 素材 ID）"); return
+
+    # 预建全量剧名列表，用于断点续传进度计算
+    all_drama_names = [drama["name"] for _, dramas in groups for drama in dramas]
+    failed_tasks = []
 
     try:
         with sync_playwright() as pw:
@@ -785,6 +793,10 @@ def run_build(profile_key: str, log_callback=None, stop_event=None):
                         f"│  🎬 [组 {g_idx}/{len(groups)} · 剧 {d_idx}/{len(dramas)}]  {drama_name}\n"
                         f"└{'─'*50}┘"
                     )
+                    if progress_callback:
+                        total_dramas_count = sum(len(dramas_list) for _, dramas_list in groups)
+                        done_count = len(completed_dramas) + len(failed_dramas)
+                        progress_callback(done_count, total_dramas_count, f"第{g_idx}组 第{d_idx}/{len(dramas)}部剧 {drama_name}")
 
                     popup = None
                     try:
@@ -869,6 +881,27 @@ def run_build(profile_key: str, log_callback=None, stop_event=None):
                             logger.info(f"✅ {drama_name} 搭建完成（预估 {ad_count} 条广告），用时 {fmt_duration(drama_elapsed)}")
                         else:
                             logger.info(f"✅ {drama_name} 搭建完成，用时 {fmt_duration(drama_elapsed)}")
+                        # 记录搭建详情（逐账户）
+                        for _acc_id in ids:
+                            try:
+                                add_build_detail(session_id, profile_key, _acc_id, "success", drama_name)
+                            except Exception:
+                                pass
+                        # 保存断点续传进度
+                        pending = [n for n in all_drama_names if n not in completed_dramas and n not in failed_dramas]
+                        save_progress(
+                            task_id=task_id,
+                            profile_key=profile_key,
+                            total_accounts=list(success_account_ids),
+                            completed=list(completed_dramas),
+                            failed=list(failed_dramas),
+                            pending=pending,
+                        )
+                        # 推送搭建进度到前端
+                        if progress_callback:
+                            total_dramas_count = sum(len(dramas_list) for _, dramas_list in groups)
+                            done_count = len(completed_dramas) + len(failed_dramas)
+                            progress_callback(done_count, total_dramas_count, f"第{g_idx}组 第{d_idx}部剧 {drama_name} 完成")
 
                     except AccountsMissingError as e:
                         # 账户缺失 → 归入"跳过组"，用 warning 而非 error，不打 ❌ 失败行
@@ -877,6 +910,12 @@ def run_build(profile_key: str, log_callback=None, stop_event=None):
                             f"⏭️ [跳过] 第 {g_idx} 组 · 剧『{drama_name}』— 账户缺失/数量不足，跳过本组剩余剧"
                             f"（缺失账户: {e}）"
                         )
+                        # 记录搭建详情（跳过）
+                        for _acc_id in ids:
+                            try:
+                                add_build_detail(session_id, profile_key, _acc_id, "skipped", drama_name, f"账户缺失: {e}")
+                            except Exception:
+                                pass
                         try:
                             if popup:
                                 popup.close()
@@ -884,16 +923,40 @@ def run_build(profile_key: str, log_callback=None, stop_event=None):
                             logger.warning(f"run_build 关闭弹窗失败(AccountsMissingError): {e}")
                         break
                     except StopRequested:
-                        logger.info("⏹ 用户中止")
-                        try:
-                            if popup:
-                                popup.close()
-                        except Exception as e:
-                            logger.warning(f"run_build 关闭弹窗失败(StopRequested): {e}")
+                        logger.info("⏹ 用户中止（保留当前标签页）")
                         raise
                     except Exception as e:
+                        # 检测CDP断连等连接级错误，中止搭建而非继续
+                        err_msg = str(e).lower()
+                        is_connection_error = any(keyword in err_msg for keyword in [
+                            'connection refused', 'target closed', 'browser has been closed',
+                            'browser disconnected', 'session closed', 'websocket',
+                            'net::err_connection', 'connection reset',
+                        ])
+                        if is_connection_error:
+                            logger.error(f"❌ 检测到浏览器连接断开，中止搭建: {e}")
+                            try:
+                                if popup:
+                                    popup.close()
+                            except Exception as e:
+                                logger.debug(f"关闭弹窗失败: {e}")
+                            raise StopRequested(f"浏览器连接断开: {e}")
                         failed_dramas.append(drama_name)
-                        logger.error(f"❌ {drama_name} 搭建失败: {e}")
+                        failed_tasks.append({
+                            "g_idx": g_idx,
+                            "d_idx": d_idx,
+                            "ids": ids,
+                            "drama": drama,
+                            "total_groups": len(groups),
+                            "total_dramas": len(dramas),
+                        })
+                        logger.error(f"❌ {drama_name} 搭建失败: {friendly_error(e)}")
+                        # 记录搭建详情（失败）
+                        for _acc_id in ids:
+                            try:
+                                add_build_detail(session_id, profile_key, _acc_id, "failed", drama_name, friendly_error(e))
+                            except Exception:
+                                pass
                         try:
                             if popup:
                                 popup.close()
@@ -907,6 +970,65 @@ def run_build(profile_key: str, log_callback=None, stop_event=None):
         logger.info("⏹ 已停止")
         return
 
+    if failed_tasks:
+        logger.warning(f"\n🔁 首轮完成后发现 {len(failed_tasks)} 部剧搭建失败，开始重试一次（账户缺失跳过不重试）")
+        retry_failed = []
+        retry_tab_lock = threading.Lock()
+        from backend.core.parallel_build import _build_single_drama
+
+        for retry_idx, task in enumerate(failed_tasks, 1):
+            check_stop(stop_event)
+            drama_name = task["drama"]["name"]
+            logger.warning(f"🔁 重试 {retry_idx}/{len(failed_tasks)}：{drama_name}")
+            try:
+                result = _build_single_drama(
+                    cdp_endpoint=cdp_endpoint,
+                    ids=task["ids"],
+                    drama=task["drama"],
+                    cfg=cfg,
+                    W=W,
+                    stop_event=stop_event,
+                    logger=logger,
+                    worker_id=1,
+                    tab_lock=retry_tab_lock,
+                    g_idx=task["g_idx"],
+                    d_idx=task["d_idx"],
+                    total_groups=task["total_groups"],
+                    total_dramas=task["total_dramas"],
+                    session_id=session_id,
+                    profile_key=profile_key,
+                )
+                if result["status"] == "ok":
+                    completed_dramas.append(drama_name)
+                    success_account_ids.update(task["ids"])
+                    total_projects += len(task["ids"])
+                    logger.info(f"✅ 重试成功：{drama_name}")
+                elif result["status"] == "skipped":
+                    skipped_groups.append(f"第{task['g_idx']}组")
+                    logger.warning(f"⏭️ 重试时账户缺失，跳过：{drama_name} — {result.get('error', '')}")
+                else:
+                    retry_failed.append(drama_name)
+                    logger.error(f"❌ 重试仍失败：{drama_name} — {result.get('error', '')}")
+            except StopRequested:
+                raise
+            except Exception as e:
+                retry_failed.append(drama_name)
+                logger.error(f"❌ 重试执行异常：{drama_name} — {friendly_error(e)}")
+
+        failed_dramas = retry_failed
+        if failed_dramas:
+            save_progress(
+                task_id=task_id,
+                profile_key=profile_key,
+                total_accounts=list(success_account_ids),
+                completed=list(completed_dramas),
+                failed=list(failed_dramas),
+                pending=[],
+            )
+            logger.error(f"⛔ 重试后仍有 {len(failed_dramas)} 部剧失败，停止继续重试并输出结果")
+        else:
+            logger.info("✅ 首轮失败剧已全部重试成功或因账户缺失转为跳过")
+
     elapsed = time.time() - t0
     logger.info(f"\n📊 搭建结果：成功 {len(completed_dramas)} 个，失败/异常/未完成 {len(failed_dramas)} 个，账户缺失跳过 {len(skipped_groups)} 组")
     if skipped_groups:
@@ -917,9 +1039,11 @@ def run_build(profile_key: str, log_callback=None, stop_event=None):
             logger.error(f"  {name}")
     else:
         logger.info("✅ 本次没有未搭建完成的剧")
+        clear_progress()
     logger.info(f"\n🎉 全部完成! 总耗时: {fmt_duration(elapsed)}")
 
     if completed_dramas:
         record_build_success(len(success_account_ids), total_projects, session_id)
         logger.info(f"📝 基建记录已更新：账户 {len(success_account_ids)} 个，项目 {total_projects} 个")
         logger.info(f"📝 本次账户ID: {', '.join(sorted(success_account_ids))}")
+        clear_progress()

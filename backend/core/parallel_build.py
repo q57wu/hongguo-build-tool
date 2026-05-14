@@ -44,6 +44,8 @@ from backend.core.build_steps import (
     step_submit_and_close,
 )
 from backend.utils.win_focus import capture_foreground, restore_foreground
+from backend.services.build_progress import save_progress, clear_progress, create_task_id
+from backend.services.build_detail_service import add_build_detail
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -108,6 +110,8 @@ def _build_single_drama(
     cdp_endpoint, ids, drama, cfg, W, stop_event,
     logger, worker_id, tab_lock, g_idx, d_idx, total_groups, total_dramas,
     group_skip_event=None, progress_tracker=None,
+    session_id="", profile_key="",
+    strategy_semaphore=None,
 ):
     """
     在独立的 Playwright 实例中连接浏览器，打开一个新的"批量新建" popup，执行完整 8 步搭建。
@@ -150,6 +154,7 @@ def _build_single_drama(
     popup = None
     pw_instance = None
     browser = None
+    _stopped_by_user = False
 
     try:
         check_stop(stop_event)
@@ -161,7 +166,17 @@ def _build_single_drama(
 
         # ── 创建本线程独立的 Playwright 实例和浏览器连接 ──
         pw_instance = sync_playwright().start()
-        browser = pw_instance.chromium.connect_over_cdp(cdp_endpoint)
+        browser = None
+        for _cdp_attempt in range(3):
+            try:
+                browser = pw_instance.chromium.connect_over_cdp(cdp_endpoint)
+                break
+            except Exception as e:
+                if _cdp_attempt < 2:
+                    logger.warning(f"{prefix} ⚠️ CDP 连接失败(第{_cdp_attempt+1}次)，2秒后重试: {e}")
+                    time.sleep(2)
+                else:
+                    raise Exception(f"CDP 连接失败，已重试3次: {e}")
         if not browser.contexts:
             raise RuntimeError(f"{prefix} 已连接浏览器，但没有可用的浏览器上下文")
         context = browser.contexts[0]
@@ -200,14 +215,15 @@ def _build_single_drama(
             popup.set_default_timeout(15_000)
             restore_foreground(_prev_fg_hwnd)
 
-            # 等待 popup 基本加载，然后释放锁让下一个 worker 可以创建 Tab
-            try:
-                popup.wait_for_load_state("domcontentloaded", timeout=30_000)
-            except PlaywrightTimeout:
-                logger.warning(f"{prefix} ⚠️ popup domcontentloaded 超时，继续")
+            # 已拿到独立 popup 引用，立即释放锁，让下一个 worker 尽快创建 Tab
+            # 小睡 0.5 秒错开浏览器渲染，避免同一瞬间大量 popup 竞争资源
+            time.sleep(0.5)
 
-            # 错开启动：释放锁后稍等一下
-            time.sleep(1.5)
+        # ── 锁外：等待 popup 基本加载（不阻塞其他 worker 创建 Tab）──
+        try:
+            popup.wait_for_load_state("domcontentloaded", timeout=30_000)
+        except PlaywrightTimeout:
+            logger.warning(f"{prefix} ⚠️ popup domcontentloaded 超时，继续")
 
         # ── 锁外：等待 popup 完全加载 ──
         try:
@@ -221,7 +237,14 @@ def _build_single_drama(
         if progress_tracker:
             progress_tracker.update(worker_id, g_idx, d_idx, total_groups, total_dramas, drama_name, "步骤1/8 选择策略")
         logger.info(f"{prefix} ➡️ 步骤1/8：选择策略")
-        step_select_strategy(popup, cfg, logger, W)
+        # 用信号量限制同时执行弹窗交互的 Tab 数，避免高并发时浏览器卡顿导致弹窗超时
+        if strategy_semaphore:
+            strategy_semaphore.acquire()
+        try:
+            step_select_strategy(popup, cfg, logger, W)
+        finally:
+            if strategy_semaphore:
+                strategy_semaphore.release()
 
         check_stop(stop_event)
         if group_skip_event and group_skip_event.is_set():
@@ -281,17 +304,19 @@ def _build_single_drama(
 
         if progress_tracker:
             progress_tracker.remove(worker_id)
+        # 记录搭建详情（成功）
+        for _acc_id in ids:
+            try:
+                add_build_detail(session_id, profile_key, _acc_id, "success", drama_name)
+            except Exception:
+                pass
         return {"status": "ok", "drama": drama_name, "ad_count": ad_count or 0}
 
     except StopRequested:
-        logger.info(f"{prefix} ⏹ 用户中止: {drama_name}")
+        _stopped_by_user = True
+        logger.info(f"{prefix} ⏹ 用户中止（保留当前标签页）: {drama_name}")
         if progress_tracker:
             progress_tracker.remove(worker_id)
-        try:
-            if popup and not popup.is_closed():
-                popup.close()
-        except Exception:
-            pass
         raise
 
     except AccountsMissingError as e:
@@ -301,6 +326,12 @@ def _build_single_drama(
             group_skip_event.set()
         if progress_tracker:
             progress_tracker.remove(worker_id)
+        # 记录搭建详情（跳过）
+        for _acc_id in ids:
+            try:
+                add_build_detail(session_id, profile_key, _acc_id, "skipped", drama_name, f"账户缺失: {e}")
+            except Exception:
+                pass
         try:
             if popup and not popup.is_closed():
                 popup.close()
@@ -312,6 +343,12 @@ def _build_single_drama(
         logger.error(f"{prefix} ❌ {drama_name} 搭建失败: {e}")
         if progress_tracker:
             progress_tracker.remove(worker_id)
+        # 记录搭建详情（失败）
+        for _acc_id in ids:
+            try:
+                add_build_detail(session_id, profile_key, _acc_id, "failed", drama_name, str(e))
+            except Exception:
+                pass
         try:
             if popup and not popup.is_closed():
                 popup.close()
@@ -321,8 +358,9 @@ def _build_single_drama(
 
     finally:
         # ── 关闭本线程的 Playwright 连接 ──
+        # 用户主动停止时，只断开 Playwright 进程，不关闭浏览器标签页
         try:
-            if browser:
+            if browser and not _stopped_by_user:
                 browser.close()
         except Exception:
             pass
@@ -390,11 +428,13 @@ def run_build_parallel(
 
     t0 = time.time()
     failed_dramas = []
+    failed_tasks = []
     completed_dramas = []
     skipped_groups = []
     total_projects = 0
     success_account_ids = set()
     session_id = str(uuid.uuid4())
+    task_id = create_task_id(profile_key)
 
     groups = profile_groups_from_config(app_cfg, profile_key)
     if groups:
@@ -430,6 +470,8 @@ def run_build_parallel(
 
     # ── 主流程：验证浏览器连通性 + 全局流水线调度 ──
     tab_lock = threading.Lock()
+    # 限制同时进行弹窗交互的 Tab 数，避免高并发时浏览器卡顿（最多 3 个 Tab 同时弹窗）
+    strategy_semaphore = threading.Semaphore(min(max_workers, 3))
     # 统计每组完成数（线程安全）
     group_completed = {g_idx: 0 for g_idx in group_ids_map}
     group_completed_lock = threading.Lock()
@@ -440,7 +482,17 @@ def run_build_parallel(
         # 主线程先连接一次以验证浏览器可达，然后立即断开
         _verify_pw = sync_playwright().start()
         try:
-            _verify_browser = _verify_pw.chromium.connect_over_cdp(cdp_endpoint)
+            _verify_browser = None
+            for _cdp_attempt in range(3):
+                try:
+                    _verify_browser = _verify_pw.chromium.connect_over_cdp(cdp_endpoint)
+                    break
+                except Exception as e:
+                    if _cdp_attempt < 2:
+                        logger.warning(f"⚠️ CDP 连接失败(第{_cdp_attempt+1}次)，2秒后重试: {e}")
+                        time.sleep(2)
+                    else:
+                        raise Exception(f"CDP 连接失败，已重试3次: {e}")
             if not _verify_browser.contexts:
                 raise RuntimeError("已连接浏览器，但没有可用的浏览器上下文")
             _verify_ctx = _verify_browser.contexts[0]
@@ -479,11 +531,15 @@ def run_build_parallel(
                     total_dramas=task["total_dramas"],
                     group_skip_event=group_skip_events[g_idx],
                     progress_tracker=progress_tracker,
+                    session_id=session_id,
+                    profile_key=profile_key,
+                    strategy_semaphore=strategy_semaphore,
                 )
                 futures[future] = {
                     "drama_name": task["drama"]["name"],
                     "g_idx": g_idx,
                     "ids": task["ids"],
+                    "task": task,
                 }
 
             # 收集结果（as_completed 保证先完成的先处理）
@@ -500,6 +556,18 @@ def run_build_parallel(
                         with group_completed_lock:
                             group_completed[g_idx] += 1
 
+                        # 保存断点续传进度
+                        all_drama_names = [t["drama"]["name"] for t in all_tasks]
+                        pending = [n for n in all_drama_names if n not in completed_dramas and n not in failed_dramas]
+                        save_progress(
+                            task_id=task_id,
+                            profile_key=profile_key,
+                            total_accounts=list(success_account_ids),
+                            completed=list(completed_dramas),
+                            failed=list(failed_dramas),
+                            pending=pending,
+                        )
+
                         # 通知每日任务
                         try:
                             from backend.bridge import bridge
@@ -511,6 +579,7 @@ def run_build_parallel(
                         skipped_groups.append(f"第{g_idx}组")
                     else:
                         failed_dramas.append(drama_name)
+                        failed_tasks.append(task_info["task"])
 
                 except StopRequested:
                     logger.info("⏹ 用户中止，取消剩余任务")
@@ -520,11 +589,89 @@ def run_build_parallel(
 
                 except Exception as e:
                     failed_dramas.append(drama_name)
+                    failed_tasks.append(task_info["task"])
                     logger.error(f"❌ {drama_name} 执行异常: {e}")
 
         # 统计 total_projects
         for g_idx, cnt in group_completed.items():
             total_projects += len(group_ids_map[g_idx]) * cnt
+
+        if failed_tasks:
+            retry_workers = 2
+            logger.warning(f"\n🔁 首轮完成后发现 {len(failed_tasks)} 部剧搭建失败，开始并行重试（{retry_workers} 路，账户缺失跳过不重试）")
+            retry_failed = []
+            retry_progress_tracker = _ProgressTracker()
+
+            with ThreadPoolExecutor(max_workers=retry_workers, thread_name_prefix="retry") as retry_pool:
+                retry_futures = {}
+                for retry_idx, task in enumerate(failed_tasks, 1):
+                    check_stop(stop_event)
+                    drama_name = task["drama"]["name"]
+                    logger.warning(f"🔁 重试 {retry_idx}/{len(failed_tasks)}：{drama_name}")
+                    worker_id = ((retry_idx - 1) % retry_workers) + 1
+                    future = retry_pool.submit(
+                        _build_single_drama,
+                        cdp_endpoint=cdp_endpoint,
+                        ids=task["ids"],
+                        drama=task["drama"],
+                        cfg=cfg,
+                        W=W,
+                        stop_event=stop_event,
+                        logger=logger,
+                        worker_id=worker_id,
+                        tab_lock=tab_lock,
+                        g_idx=task["g_idx"],
+                        d_idx=task["d_idx"],
+                        total_groups=task["total_groups"],
+                        total_dramas=task["total_dramas"],
+                        progress_tracker=retry_progress_tracker,
+                        session_id=session_id,
+                        profile_key=profile_key,
+                    )
+                    retry_futures[future] = {
+                        "drama_name": drama_name,
+                        "g_idx": task["g_idx"],
+                        "ids": task["ids"],
+                    }
+
+                for future in as_completed(retry_futures):
+                    info = retry_futures[future]
+                    drama_name = info["drama_name"]
+                    try:
+                        result = future.result()
+                        if result["status"] == "ok":
+                            completed_dramas.append(drama_name)
+                            success_account_ids.update(info["ids"])
+                            total_projects += len(info["ids"])
+                            logger.info(f"✅ 重试成功：{drama_name}")
+                        elif result["status"] == "skipped":
+                            skipped_groups.append(f"第{info['g_idx']}组")
+                            logger.warning(f"⏭️ 重试时账户缺失，跳过：{drama_name} — {result.get('error', '')}")
+                        else:
+                            retry_failed.append(drama_name)
+                            logger.error(f"❌ 重试仍失败：{drama_name} — {result.get('error', '')}")
+                    except StopRequested:
+                        logger.info("⏹ 重试阶段用户中止，取消剩余任务")
+                        for f in retry_futures:
+                            f.cancel()
+                        raise
+                    except Exception as e:
+                        retry_failed.append(drama_name)
+                        logger.error(f"❌ 重试异常：{drama_name} — {e}")
+
+            failed_dramas = retry_failed
+            if failed_dramas:
+                save_progress(
+                    task_id=task_id,
+                    profile_key=profile_key,
+                    total_accounts=list(success_account_ids),
+                    completed=list(completed_dramas),
+                    failed=list(failed_dramas),
+                    pending=[],
+                )
+                logger.error(f"⛔ 重试后仍有 {len(failed_dramas)} 部剧失败，停止继续重试并输出结果")
+            else:
+                logger.info("✅ 首轮失败剧已全部重试成功或因账户缺失转为跳过")
 
     except StopRequested:
         logger.info("⏹ 已停止")
@@ -545,8 +692,10 @@ def run_build_parallel(
             logger.error(f"  {name}")
     else:
         logger.info("✅ 本次没有未搭建完成的剧")
+        clear_progress()
     logger.info(f"\n🎉 全部完成! 总耗时: {fmt_duration(elapsed)}")
 
     if completed_dramas:
         record_build_success(len(success_account_ids), total_projects, session_id)
         logger.info(f"📝 基建记录已更新：账户 {len(success_account_ids)} 个，项目 {total_projects} 个")
+        clear_progress()

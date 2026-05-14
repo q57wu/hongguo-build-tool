@@ -30,6 +30,8 @@ class BuildEngine:
 
     def run(self, profile_key: str):
         with self._lock:
+            if self._running:
+                return
             self._running = True
         self._current_profile = profile_key
         self._stop_event.clear()
@@ -45,6 +47,9 @@ class BuildEngine:
                 progress_callback=self._update_progress,
             )
             bridge.emit_build_status("completed", {"profile": profile_key})
+        except StopRequested:
+            bridge.emit_log("⏹ 搭建已停止", "warn")
+            bridge.emit_build_status("stopped", {"profile": profile_key})
         except Exception as e:
             bridge.emit_log(f"❌ 搭建失败: {e}", "error")
             bridge.emit_build_status("error", {"message": str(e)})
@@ -56,12 +61,11 @@ class BuildEngine:
 
     def run_parallel(self, profile_key: str, max_workers: int = 3):
         """并行搭建：使用多线程并行执行搭建任务以提升效率"""
-        if self._running:
-            return
-
         with self._lock:
+            if self._running:
+                return
             self._running = True
-            self._stop_event = threading.Event()
+            self._stop_event.clear()
 
         self._current_profile = profile_key
         self._stop_event.clear()
@@ -114,6 +118,8 @@ class BuildEngine:
         """从断点续传搭建"""
         profile_key = progress["profile"]
         with self._lock:
+            if self._running:
+                return
             self._running = True
         self._current_profile = profile_key
         self._stop_event.clear()
@@ -133,15 +139,20 @@ class BuildEngine:
                 resume_accounts=pending,  # 传入待续传的账户列表
             )
             bridge.emit_build_status("completed", {"profile": profile_key})
-            # 清除进度文件
-            from backend.services.build_progress import clear_progress
-            clear_progress()
+        except StopRequested:
+            bridge.emit_log("⏹ 搭建已停止", "warn")
+            bridge.emit_build_status("stopped", {"profile": profile_key})
         except Exception as e:
             bridge.emit_log(f"❌ 续传搭建失败: {e}", "error")
             bridge.emit_build_status("error", {"message": str(e)})
-            import traceback
             traceback.print_exc()
         finally:
+            # 无论成功失败，都清除断点续传进度文件，避免反复弹出提示
+            try:
+                from backend.services.build_progress import clear_progress
+                clear_progress()
+            except Exception:
+                pass
             with self._lock:
                 self._running = False
             self._current_profile = None

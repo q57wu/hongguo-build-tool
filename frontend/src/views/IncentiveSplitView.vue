@@ -30,44 +30,40 @@
 
       <div class="log-box" ref="logBox">
         <div v-for="(line, i) in logs" :key="i" class="log-line">{{ line }}</div>
-        <div v-if="!logs.length" class="log-empty">等待处理...</div>
+        <div v-if="!logs.length" class="log-empty">
+          <p class="empty-title">📋 使用步骤</p>
+          <ol class="empty-steps">
+            <li>先在「激励推广链生成」页面生成激励推广链</li>
+            <li>从巨量引擎后台导出推广链统计表（Excel）</li>
+            <li>确保 Excel 文件在下载目录中</li>
+            <li>点击「开始拆分」自动读取并按激励方向分组</li>
+          </ol>
+        </div>
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { splitIncentiveLinks } from '@/services/api'
 import { useUiStore } from '@/stores/ui'
+import { useToolLogger } from '../composables/useToolLogger'
 
 const uiStore = useUiStore()
 const router = useRouter()
 
-const running = ref(false)
 const statusText = ref('就绪')
-const logs = ref([])
-const logBox = ref(null)
-const autoScroll = ref(true)
+const { logs, running, logBox } = useToolLogger({
+  onDone: () => { statusText.value = '处理完成' }
+})
 
 const groups = ref([
   { key: '激励-每留', label: '激励每留', count: 0, text: '' },
   { key: '激励-七留', label: '激励七留', count: 0, text: '' },
 ])
 
-function onLogScroll() {
-  if (!logBox.value) return
-  const el = logBox.value
-  autoScroll.value = el.scrollHeight - el.scrollTop - el.clientHeight < 40
-}
-
-function onToolLog(e) {
-  logs.value.push(e.detail.message)
-  if (autoScroll.value) {
-    nextTick(() => { if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight })
-  }
-}
 function onSplitResult(e) {
   const { texts, counts } = e.detail
   for (const g of groups.value) {
@@ -75,24 +71,22 @@ function onSplitResult(e) {
     if (counts[g.key] !== undefined) g.count = counts[g.key]
   }
 }
-function onToolDone() { running.value = false; statusText.value = '处理完成' }
 
 onMounted(() => {
-  window.addEventListener('honguo:tool-log', onToolLog)
   window.addEventListener('honguo:split-result', onSplitResult)
-  window.addEventListener('honguo:tool-done', onToolDone)
-  if (logBox.value) logBox.value.addEventListener('scroll', onLogScroll)
 })
 onUnmounted(() => {
-  window.removeEventListener('honguo:tool-log', onToolLog)
   window.removeEventListener('honguo:split-result', onSplitResult)
-  window.removeEventListener('honguo:tool-done', onToolDone)
-  if (logBox.value) logBox.value.removeEventListener('scroll', onLogScroll)
 })
 
 async function startSplit() {
   running.value = true; logs.value = []; statusText.value = '处理中...'
-  await splitIncentiveLinks()
+  try {
+    await splitIncentiveLinks()
+  } catch (e) {
+    logs.value.push(`❌ 分割失败: ${e.message || e}`)
+    running.value = false
+  }
 }
 
 function copyGroup(group) {
@@ -100,9 +94,31 @@ function copyGroup(group) {
   statusText.value = `✅ 已复制 ${group.label}`
 }
 
+function _isKnownLink(url) {
+  const u = url.toLowerCase()
+  return u.startsWith('http') && (
+    u.includes('action_type=effective_play') ||
+    u.includes('action_type=click') ||
+    u.includes('action_type=view') ||
+    u.includes('effective_play') ||
+    u.includes('/display/') ||
+    u.includes('impression')
+  )
+}
+
+function _filterGroupText(raw) {
+  return raw.split('\n').map(line => {
+    const cols = line.split('\t')
+    if (cols.length <= 1) return line
+    const name = cols[0]
+    const links = cols.slice(1).filter(c => _isKnownLink(c.trim()))
+    return [name, ...links].join('\t')
+  }).join('\n')
+}
+
 function fillToLinkAssign(group) {
   if (!group.text) return
-  uiStore.setPendingLinkData(group.text)
+  uiStore.setPendingLinkData(_filterGroupText(group.text), group.key)
   router.push({ name: 'incentive-link' })
 }
 
@@ -119,7 +135,7 @@ function clearAll() {
 .btn-row { display: flex; gap: 8px; }
 .status-tag { display: inline-block; font-size: 11px; font-weight: 600; padding: 3px 10px; border-radius: 10px; margin-top: 12px; }
 .status-idle { background: var(--c-surface); color: var(--c-dim); }
-.status-running { background: #ecfdf5; color: #065f46; }
+.status-running { background: rgba(0, 212, 138, 0.12); color: var(--c-green); }
 .result-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
 .result-card { padding: 14px; }
 .result-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
@@ -130,4 +146,7 @@ function clearAll() {
 .log-box { margin-top: 14px; background: var(--c-log-bg); border-radius: var(--r-md); padding: 14px; max-height: 180px; overflow-y: auto; font-family: var(--f-mono); font-size: 12px; line-height: 1.7; color: var(--c-log-fg); user-select: text; -webkit-user-select: text; cursor: text; }
 .log-line { padding: 1px 0; }
 .log-empty { color: var(--c-log-dim); }
+.empty-title { font-size: 13px; font-weight: 600; color: var(--c-text-2); margin-bottom: 8px; }
+.empty-steps { margin: 0; padding-left: 20px; font-size: 12px; color: var(--c-dim); line-height: 2; }
+.empty-steps li { padding: 0; }
 </style>

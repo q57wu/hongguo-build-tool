@@ -54,27 +54,35 @@
 
       <div class="log-box" ref="logBox">
         <div v-for="(line, i) in logs" :key="i" class="log-line">{{ line }}</div>
-        <div v-if="!logs.length" class="log-empty">等待处理...</div>
+        <div v-if="!logs.length" class="log-empty">
+          <p class="empty-title">📋 使用步骤</p>
+          <ol class="empty-steps">
+            <li>先在「推广链生成」页面生成推广链接</li>
+            <li>从巨量引擎后台导出推广链统计表（Excel）</li>
+            <li>确保 Excel 文件在下载目录中</li>
+            <li>点击「开始拆分」自动读取并按方向分组</li>
+          </ol>
+        </div>
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { splitPromoLinks } from '@/services/api'
 import { useBuildStore } from '@/stores/build'
 import { useUiStore } from '@/stores/ui'
+import { useToolLogger } from '../composables/useToolLogger'
 
 const buildStore = useBuildStore()
 const uiStore = useUiStore()
 const router = useRouter()
-const running = ref(false)
 const statusText = ref('就绪')
-const logs = ref([])
-const logBox = ref(null)
-const autoScroll = ref(true)
+const { logs, running, logBox } = useToolLogger({
+  onDone: () => { statusText.value = '处理完成' }
+})
 
 // 剧名过滤（持久化）
 const useFilter = ref(localStorage.getItem('promoSplit_useFilter') === '1')
@@ -116,18 +124,6 @@ const groups = ref([
   { key: 'IOS-七留', label: 'iOS七留', count: 0, text: '' },
 ])
 
-function onLogScroll() {
-  if (!logBox.value) return
-  const el = logBox.value
-  autoScroll.value = el.scrollHeight - el.scrollTop - el.clientHeight < 40
-}
-
-function onToolLog(e) {
-  logs.value.push(e.detail.message)
-  if (autoScroll.value) {
-    nextTick(() => { if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight })
-  }
-}
 function onSplitResult(e) {
   const { texts, counts } = e.detail
   for (const g of groups.value) {
@@ -136,23 +132,13 @@ function onSplitResult(e) {
   }
   saveGroups()
 }
-function onToolDone(e) {
-  running.value = false
-  statusText.value = '处理完成'
-}
 
 onMounted(() => {
-  window.addEventListener('honguo:tool-log', onToolLog)
   window.addEventListener('honguo:split-result', onSplitResult)
-  window.addEventListener('honguo:tool-done', onToolDone)
-  if (logBox.value) logBox.value.addEventListener('scroll', onLogScroll)
   loadGroups()
 })
 onUnmounted(() => {
-  window.removeEventListener('honguo:tool-log', onToolLog)
   window.removeEventListener('honguo:split-result', onSplitResult)
-  window.removeEventListener('honguo:tool-done', onToolDone)
-  if (logBox.value) logBox.value.removeEventListener('scroll', onLogScroll)
 })
 
 async function startSplit() {
@@ -160,7 +146,12 @@ async function startSplit() {
   logs.value = []
   statusText.value = '处理中...'
   const filter = useFilter.value && filterNames.value.length ? filterNames.value : null
-  await splitPromoLinks('normal', filter)
+  try {
+    await splitPromoLinks('normal', filter)
+  } catch (e) {
+    logs.value.push(`❌ 分割失败: ${e.message || e}`)
+    running.value = false
+  }
 }
 
 function copyGroup(group) {
@@ -168,9 +159,32 @@ function copyGroup(group) {
   statusText.value = `✅ 已复制 ${group.label}`
 }
 
+function _isKnownLink(url) {
+  const u = url.toLowerCase()
+  return u.startsWith('http') && (
+    u.includes('action_type=effective_play') ||
+    u.includes('action_type=click') ||
+    u.includes('action_type=view') ||
+    u.includes('effective_play') ||
+    u.includes('/display/') ||
+    u.includes('impression')
+  )
+}
+
+function _filterGroupText(raw) {
+  // 每行 tab 分隔：计划名 + 多个链接列，只保留计划名 + 可识别的监控链接
+  return raw.split('\n').map(line => {
+    const cols = line.split('\t')
+    if (cols.length <= 1) return line
+    const name = cols[0]
+    const links = cols.slice(1).filter(c => _isKnownLink(c.trim()))
+    return [name, ...links].join('\t')
+  }).join('\n')
+}
+
 function fillToLinkAssign(group) {
   if (!group.text) return
-  uiStore.setPendingLinkData(group.text)
+  uiStore.setPendingLinkData(_filterGroupText(group.text))
   router.push({ name: 'juming' })
 }
 
@@ -190,7 +204,7 @@ function clearAll() {
 .btn-row { display: flex; gap: 8px; }
 .status-tag { display: inline-block; font-size: 11px; font-weight: 600; padding: 3px 10px; border-radius: 10px; margin-top: 12px; }
 .status-idle { background: var(--c-surface); color: var(--c-dim); }
-.status-running { background: #ecfdf5; color: #065f46; }
+.status-running { background: rgba(0, 212, 138, 0.12); color: var(--c-green); }
 .result-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
 
 @media (max-width: 768px) {
@@ -206,11 +220,14 @@ function clearAll() {
 .log-box { margin-top: 14px; background: var(--c-log-bg); border-radius: var(--r-md); padding: 14px; max-height: 180px; overflow-y: auto; font-family: var(--f-mono); font-size: 12px; line-height: 1.7; color: var(--c-log-fg); user-select: text; -webkit-user-select: text; cursor: text; }
 .log-line { padding: 1px 0; }
 .log-empty { color: var(--c-log-dim); }
+.empty-title { font-size: 13px; font-weight: 600; color: var(--c-text-2); margin-bottom: 8px; }
+.empty-steps { margin: 0; padding-left: 20px; font-size: 12px; color: var(--c-dim); line-height: 2; }
+.empty-steps li { padding: 0; }
 
 /* 过滤区 */
 .filter-block { margin-top: 14px; padding: 12px 14px; background: var(--c-surface); border-radius: var(--r-sm); border: 1px solid var(--c-border); }
 .filter-toggle { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; cursor: pointer; user-select: none; }
-.filter-toggle input { accent-color: var(--c-primary, #4f8ef7); width: 15px; height: 15px; cursor: pointer; }
+.filter-toggle input { accent-color: var(--c-primary); width: 15px; height: 15px; cursor: pointer; }
 .filter-body { margin-top: 10px; }
 .filter-textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--c-border); border-radius: var(--r-sm); font-family: var(--f-mono); font-size: 12px; resize: vertical; background: var(--c-bg); color: var(--c-text); outline: none; }
 .filter-hint { margin-top: 6px; font-size: 11px; color: var(--c-dim); display: flex; align-items: center; gap: 6px; }

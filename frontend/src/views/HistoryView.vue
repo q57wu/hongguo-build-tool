@@ -123,7 +123,7 @@ onMounted(loadHistory)
 .col-date { width: 80px; flex-shrink: 0; font-family: var(--f-mono); font-weight: 600; font-size: 12px; color: var(--c-text-2); }
 .col-name { flex: 1; color: var(--c-text); }
 .text-primary { color: var(--c-primary); font-weight: 700; }
-.row-btn { background: none; border: none; cursor: pointer; opacity: 0.3; padding: 2px 4px; font-size: 12px; transition: opacity var(--transition-fast); }
+.row-btn { background: none; border: none; cursor: pointer; opacity: 0.5; padding: 2px 4px; font-size: 12px; transition: opacity var(--transition-fast); }
 .list-row:hover .row-btn,
 .list-row:focus-within .row-btn { opacity: 0.6; }
 .row-btn:hover { opacity: 1 !important; }

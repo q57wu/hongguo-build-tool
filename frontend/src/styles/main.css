@@ -1,52 +1,105 @@
-/* ═══ CSS 变量（设计 Token） ═══ */
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+
+/* ═══════════════════════════════════════════════════════════
+   DESIGN SYSTEM: Light Orchard Workbench
+   Aesthetic: warm paperwork · clean control room · soft amber cues
+   ═══════════════════════════════════════════════════════════ */
+
 :root {
-  /* 中性色阶 */
-  --c-bg: #f7f8fa;
-  --c-card: #ffffff;
-  --c-surface: #f1f3f7;
-  --c-border: #e4e7ec;
-  --c-border-s: #eef0f3;
-  --c-hover: #f4f5f7;
+  /* ── Core Palette: warm light foundations ── */
+  --c-bg: #f6f1e8;
+  --c-card: #fffdf8;
+  --c-surface: #edf4f7;
+  --c-border: #d8d1c4;
+  --c-border-s: #e7dfd1;
+  --c-hover: #f3e8d4;
 
-  /* 文本 */
-  --c-text: #0f172a;
-  --c-text-2: #475569;
-  --c-dim: #94a3b8;
+  /* ── Text Hierarchy ── */
+  --c-text: #273142;
+  --c-text-2: #657386;
+  --c-dim: #8b958f;
 
-  /* 品牌 */
-  --c-accent: #ef4444;
-  --c-accent-h: #dc2626;
-  --c-primary: #4f46e5;
-  --c-primary-h: #4338ca;
+  /* ── Brand: Amber precision accent ── */
+  --c-accent: #d88900;
+  --c-accent-h: #b87300;
+  --c-primary: #2f7ecb;
+  --c-primary-h: #2366a8;
 
-  /* 语义 */
-  --c-green: #10b981;
-  --c-green-h: #059669;
-  --c-red: #ef4444;
-  --c-red-h: #dc2626;
-  --c-orange: #f59e0b;
-  --c-blue: #3b82f6;
+  /* ── Semantic Status ── */
+  --c-green: #17996b;
+  --c-green-h: #117e58;
+  --c-red: #df3f52;
+  --c-red-h: #bd2f40;
+  --c-orange: #d88900;
+  --c-blue: #2f7ecb;
 
-  /* 日志 */
-  --c-log-bg: #0f172a;
-  --c-log-fg: #e2e8f0;
-  --c-log-dim: #64748b;
+  /* ── Status Contextual ── */
+  --c-status-success-bg: rgba(23, 153, 107, 0.1);
+  --c-status-success-text: #117e58;
+  --c-status-success-border: rgba(23, 153, 107, 0.22);
 
-  /* 圆角 */
-  --r-lg: 14px;
-  --r-md: 10px;
-  --r-sm: 8px;
+  --c-status-error-bg: rgba(223, 63, 82, 0.09);
+  --c-status-error-text: #bd2f40;
+  --c-status-error-border: rgba(223, 63, 82, 0.22);
 
-  /* 字体 */
-  --f-ui: 'Microsoft YaHei UI', -apple-system, BlinkMacSystemFont, sans-serif;
-  --f-mono: 'JetBrains Mono', 'Consolas', 'Courier New', monospace;
+  --c-status-warn-bg: rgba(216, 137, 0, 0.11);
+  --c-status-warn-text: #9d6400;
+  --c-status-warn-border: rgba(216, 137, 0, 0.24);
 
-  /* 动画 */
-  --transition-fast: 0.15s ease;
-  --transition-normal: 0.25s ease;
+  --c-status-info-bg: rgba(47, 126, 203, 0.1);
+  --c-status-info-text: #2366a8;
+  --c-status-info-border: rgba(47, 126, 203, 0.2);
+
+  /* ── Overlay ── */
+  --c-overlay: rgba(39, 49, 66, 0.28);
+
+  /* ── Teal (tool buttons) ── */
+  --c-teal: #0097a7;
+  --c-teal-h: #087b86;
+
+  /* ── Log Terminal ── */
+  --c-log-bg: #f9fbfc;
+  --c-log-fg: #345065;
+  --c-log-dim: #9aa9b5;
+  --c-log-banner: #d88900;
+  --c-log-header-border: rgba(216, 137, 0, 0.18);
+
+  /* ── Radii ── */
+  --r-lg: 12px;
+  --r-md: 8px;
+  --r-sm: 6px;
+
+  /* ── Typography ── */
+  --f-ui: 'Plus Jakarta Sans', 'Noto Sans SC', system-ui, sans-serif;
+  --f-mono: 'DM Mono', 'JetBrains Mono', 'Consolas', monospace;
+
+  /* ── Motion ── */
+  --transition-fast: 0.12s cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-normal: 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* ── Spacing Scale ── */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+
+  /* ── Type Scale ── */
+  --fs-xs: 11px;
+  --fs-sm: 13px;
+  --fs-md: 15px;
+  --fs-lg: 18px;
+
+  /* ── Elevation ── */
+  --shadow-sm: 0 1px 2px rgba(72, 58, 36, 0.06), 0 10px 24px rgba(72, 58, 36, 0.05);
+  --shadow-md: 0 10px 28px rgba(72, 58, 36, 0.09), 0 2px 8px rgba(72, 58, 36, 0.05);
+  --shadow-lg: 0 18px 54px rgba(72, 58, 36, 0.14), 0 6px 16px rgba(72, 58, 36, 0.08);
+  --shadow-glow: 0 0 24px rgba(216, 137, 0, 0.14);
+  --shadow-glow-blue: 0 0 22px rgba(47, 126, 203, 0.14);
 }
 
-/* ═══ 全局重置 ═══ */
+/* ═══ Global Reset ═══ */
 *, *::before, *::after {
   box-sizing: border-box;
   margin: 0;
@@ -56,7 +109,10 @@
 html, body {
   height: 100%;
   font-family: var(--f-ui);
-  background: var(--c-bg);
+  background:
+    radial-gradient(circle at 12% 8%, rgba(255, 214, 145, 0.42), transparent 28%),
+    radial-gradient(circle at 88% 12%, rgba(196, 224, 238, 0.62), transparent 30%),
+    linear-gradient(135deg, #fbf7ef 0%, var(--c-bg) 46%, #eef6f6 100%);
   color: var(--c-text);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -66,30 +122,30 @@ html, body {
   height: 100%;
 }
 
-/* ═══ 页面过渡动画 ═══ */
+/* ═══ Page Transitions ═══ */
 .page-enter-active,
 .page-leave-active {
-  transition: opacity 0.15s ease, transform 0.15s ease;
+  transition: opacity 0.2s ease, transform 0.2s ease;
 }
 
 .page-enter-from {
   opacity: 0;
-  transform: translateX(12px);
+  transform: translateX(8px);
 }
 
 .page-leave-to {
   opacity: 0;
-  transform: translateX(-12px);
+  transform: translateX(-8px);
 }
 
-/* ═══ 滚动条美化 ═══ */
+/* ═══ Scrollbar: Precision rails ═══ */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
 }
 
 ::-webkit-scrollbar-track {
-  background: transparent;
+  background: rgba(39, 49, 66, 0.04);
 }
 
 ::-webkit-scrollbar-thumb {
@@ -101,12 +157,38 @@ html, body {
   background: var(--c-dim);
 }
 
-/* ═══ 通用组件样式 ═══ */
+/* ═══ Card System: Layered depth ═══ */
 .card {
   background: var(--c-card);
-  border: 1px solid var(--c-border);
   border-radius: var(--r-lg);
+  border: 1px solid var(--c-border-s);
+  box-shadow: var(--shadow-sm);
   padding: 20px;
+  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  position: relative;
+  overflow: hidden;
+}
+
+.card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(216, 137, 0, 0.24), transparent);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.card:hover {
+  border-color: var(--c-border);
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
+}
+
+.card:hover::before {
+  opacity: 1;
 }
 
 .card-title {
@@ -114,12 +196,15 @@ html, body {
   font-weight: 700;
   color: var(--c-text);
   margin-bottom: 12px;
+  letter-spacing: -0.02em;
 }
 
+/* ═══ Button System ═══ */
 .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 6px;
   padding: 8px 16px;
   border-radius: var(--r-sm);
   font-size: 13px;
@@ -128,44 +213,183 @@ html, body {
   cursor: pointer;
   border: none;
   transition: all var(--transition-fast);
+  user-select: none;
+  position: relative;
+  overflow: hidden;
+}
+
+.btn::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(255,255,255,0.05) 0%, transparent 50%);
+  pointer-events: none;
 }
 
 .btn-primary {
   background: var(--c-primary);
   color: #fff;
+  box-shadow: 0 2px 8px rgba(45, 122, 237, 0.3);
 }
 
-.btn-primary:hover {
+.btn-primary:hover:not(:disabled) {
   background: var(--c-primary-h);
+  box-shadow: 0 4px 16px rgba(45, 122, 237, 0.4);
+  transform: translateY(-1px);
 }
 
 .btn-danger {
   background: var(--c-red);
   color: #fff;
+  box-shadow: 0 2px 8px rgba(255, 71, 87, 0.3);
 }
 
-.btn-danger:hover {
+.btn-danger:hover:not(:disabled) {
   background: var(--c-red-h);
+  box-shadow: 0 4px 16px rgba(255, 71, 87, 0.4);
+  transform: translateY(-1px);
 }
 
 .btn-ghost {
-  background: var(--c-surface);
+  background: transparent;
   color: var(--c-text-2);
   border: 1px solid var(--c-border);
 }
 
-.btn-ghost:hover {
+.btn-ghost::after { display: none; }
+
+.btn-ghost:hover:not(:disabled) {
   background: var(--c-hover);
   color: var(--c-text);
+  border-color: var(--c-dim);
 }
 
 .btn:focus,
 .btn:focus-visible {
-  outline: 2px solid var(--c-primary);
+  outline: 2px solid var(--c-accent);
   outline-offset: 2px;
 }
 
 .btn:disabled {
-  opacity: 0.5;
+  opacity: 0.35;
   cursor: not-allowed;
+  transform: none !important;
+  box-shadow: none !important;
+}
+
+.btn-sm {
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.btn:active:not(:disabled),
+.btn-sm:active:not(:disabled) {
+  transform: scale(0.96);
+  transition-duration: 0.08s;
+}
+
+/* ── Page Heading ── */
+.page-title {
+  font-size: 20px;
+  font-weight: 800;
+  color: var(--c-text);
+  margin: 0 0 4px;
+  letter-spacing: -0.03em;
+}
+
+.page-desc {
+  font-size: 13px;
+  color: var(--c-dim);
+  margin: 0 0 20px;
+}
+
+/* ── Focus Ring ── */
+*:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: none;
+  border-color: var(--c-accent);
+  box-shadow: 0 0 0 3px rgba(240, 165, 0, 0.1);
+}
+
+/* ═══ Animation System ═══ */
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { box-shadow: 0 0 0 0 currentColor; opacity: 1; }
+  50% { box-shadow: 0 0 0 6px transparent; opacity: 0.6; }
+}
+
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+@keyframes float-up {
+  from { opacity: 0; transform: translateY(20px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes scanline {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(100vh); }
+}
+
+@keyframes data-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+@keyframes glow-breathe {
+  0%, 100% { box-shadow: 0 0 4px rgba(240, 165, 0, 0.2); }
+  50% { box-shadow: 0 0 12px rgba(240, 165, 0, 0.4); }
+}
+
+.animate-in {
+  animation: fadeInUp 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.animate-float-up {
+  animation: float-up 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.pulse-dot {
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+.shimmer-bar {
+  position: relative;
+  overflow: hidden;
+}
+
+.shimmer-bar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(240, 165, 0, 0.15), transparent);
+  animation: shimmer 2.5s ease-in-out infinite;
+}
+
+/* ═══ Utility: Noise texture overlay ═══ */
+.noise-texture::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  opacity: 0.03;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+  pointer-events: none;
+  z-index: 0;
 }

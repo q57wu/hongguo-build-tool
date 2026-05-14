@@ -17,8 +17,8 @@ export const useUiStore = defineStore('ui', () => {
   // 格式: { rawData: string }，为 null 表示没有待填
   const pendingLinkData = ref(null)
 
-  function setPendingLinkData(rawData) {
-    pendingLinkData.value = { rawData }
+  function setPendingLinkData(rawData, sourceKey) {
+    pendingLinkData.value = { rawData, sourceKey: sourceKey || null }
   }
 
   function consumePendingLinkData() {
@@ -27,5 +27,18 @@ export const useUiStore = defineStore('ui', () => {
     return data
   }
 
-  return { workMode, setWorkMode, toggleMode, pendingLinkData, setPendingLinkData, consumePendingLinkData }
+  // 素材爬取 → 素材推送 的待填剧名数据
+  const pendingCrawlDramas = ref(null)
+
+  function setPendingCrawlDramas(dramaNames) {
+    pendingCrawlDramas.value = dramaNames
+  }
+
+  function consumePendingCrawlDramas() {
+    const data = pendingCrawlDramas.value
+    pendingCrawlDramas.value = null
+    return data
+  }
+
+  return { workMode, setWorkMode, toggleMode, pendingLinkData, setPendingLinkData, consumePendingLinkData, pendingCrawlDramas, setPendingCrawlDramas, consumePendingCrawlDramas }
 })

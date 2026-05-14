@@ -5,7 +5,7 @@ import filelock
 from pathlib import Path
 from datetime import datetime
 
-MAX_BACKUPS = 5
+MAX_BACKUPS = 10
 
 
 def save_json_atomic(filepath: Path, data, backup_dir: Path = None):

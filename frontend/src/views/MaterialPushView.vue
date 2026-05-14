@@ -41,12 +41,15 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, watch, nextTick, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { getRawConfig, searchMaterialPush, stopMaterialPush } from '@/services/api'
+import { useUiStore } from '@/stores/ui'
+import { useToolLogger } from '../composables/useToolLogger'
 
 const route = useRoute()
 const isIncentive = computed(() => route.meta.mode === 'incentive')
+const uiStore = useUiStore()
 
 // 防抖工具：在 delay ms 内仅执行最后一次调用
 function debounce(fn, delay) {
@@ -65,10 +68,7 @@ const _storedPlatform = localStorage.getItem('materialPush_platform')
 const platform = ref(_storedPlatform || '安卓')
 const accountId = ref('')
 const dramaNames = ref(localStorage.getItem('materialPush_dramaNames') || '')
-const running = ref(false)
-const logs = ref([])
-const logBox = ref(null)
-const autoScroll = ref(true)
+const { logs, running, logBox } = useToolLogger()
 
 // 按平台分开的 localStorage key
 const ACCOUNT_KEY = {
@@ -89,12 +89,6 @@ const saveAccountId = debounce((v) => {
 watch(accountId, (v) => {
   if (!isAutoFill) saveAccountId(v)
 })
-
-function onLogScroll() {
-  if (!logBox.value) return
-  const el = logBox.value
-  autoScroll.value = el.scrollHeight - el.scrollTop - el.clientHeight < 40
-}
 
 // 切换平台或模式时，读取对应平台的缓存值；无缓存则回落到配置默认值
 // 仅在配置已加载后执行（避免 onMounted 前覆盖）
@@ -119,19 +113,7 @@ function lineClass(line) {
   return ''
 }
 
-function onToolLog(e) {
-  logs.value.push(e.detail.message)
-  if (autoScroll.value) {
-    nextTick(() => { if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight })
-  }
-}
-function onToolDone() { running.value = false }
-
 onMounted(async () => {
-  window.addEventListener('honguo:tool-log', onToolLog)
-  window.addEventListener('honguo:tool-done', onToolDone)
-  if (logBox.value) logBox.value.addEventListener('scroll', onLogScroll)
-
   // 等待 pywebview API 就绪后再读取配置
   try {
     const cfg = await getRawConfig()
@@ -167,11 +149,12 @@ onMounted(async () => {
       nextTick(() => { isAutoFill = false })
     }
   }
-})
-onUnmounted(() => {
-  window.removeEventListener('honguo:tool-log', onToolLog)
-  window.removeEventListener('honguo:tool-done', onToolDone)
-  if (logBox.value) logBox.value.removeEventListener('scroll', onLogScroll)
+
+  // 消费从素材爬取页传过来的剧名
+  const pendingDramas = uiStore.consumePendingCrawlDramas()
+  if (pendingDramas) {
+    dramaNames.value = pendingDramas
+  }
 })
 
 async function startPush() {
@@ -197,14 +180,14 @@ async function stopPush() {
 .text-input { padding: 8px 12px; border: 1px solid var(--c-border); border-radius: var(--r-sm); font-family: var(--f-mono); font-size: 13px; width: 280px; background: var(--c-card); outline: none; color: var(--c-text); }
 .text-input:focus { border-color: var(--c-primary); }
 .seg-group { display: flex; background: var(--c-surface); border-radius: var(--r-sm); padding: 3px; gap: 2px; }
-.seg-btn { padding: 6px 18px; border: none; border-radius: 6px; font-size: 13px; font-weight: 600; font-family: var(--f-ui); color: var(--c-text); background: transparent; cursor: pointer; transition: all var(--transition-fast); }
+.seg-btn { padding: 6px 18px; border: none; border-radius: var(--r-sm); font-size: 13px; font-weight: 600; font-family: var(--f-ui); color: var(--c-text); background: transparent; cursor: pointer; transition: all var(--transition-fast); }
 .seg-btn:hover:not(.active) { background: var(--c-hover); }
-.seg-btn.active { background: var(--c-primary); color: #fff; }
+.seg-btn.active { background: var(--c-primary); color: var(--c-text); }
 .input-area { width: 100%; padding: 10px 14px; border: 1px solid var(--c-border); border-radius: var(--r-sm); font-family: var(--f-mono); font-size: 12px; resize: vertical; background: var(--c-card); color: var(--c-text); outline: none; }
 .btn-row { display: flex; gap: 8px; margin-top: 16px; }
 .status-tag { display: inline-block; font-size: 11px; font-weight: 600; padding: 3px 10px; border-radius: 10px; margin-top: 12px; }
 .status-idle { background: var(--c-surface); color: var(--c-dim); }
-.status-running { background: #ecfdf5; color: #065f46; }
+.status-running { background: rgba(0, 212, 138, 0.12); color: var(--c-green); }
 .log-box { margin-top: 12px; background: var(--c-log-bg); border-radius: var(--r-md); padding: 14px; max-height: 360px; overflow-y: auto; font-family: var(--f-mono); font-size: 12px; line-height: 1.7; color: var(--c-log-fg); user-select: text; -webkit-user-select: text; cursor: text; }
 .log-line { padding: 1px 0; }
 .log-empty { color: var(--c-log-dim); }

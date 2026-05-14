@@ -5,7 +5,7 @@ JS Bridge API：暴露给前端的所有 Python 方法
 import threading
 from backend.task_registry import task_registry
 from backend.config_manager import (
-    load_config, save_config,
+    load_config, save_config, CONFIG_FILE,
     load_build_records, load_material_history, save_material_history,
 )
 from backend.build_engine import BuildEngine
@@ -86,6 +86,19 @@ class Api:
         from backend.services.browser_service import launch_chrome_async
         launch_chrome_async()
         return {"ok": True, "message": "正在启动浏览器，请稍候…"}
+
+    def dump_page_structure(self) -> dict:
+        def _worker():
+            try:
+                from backend.core.config_io import load_config
+                from backend.utils.diagnostics import dump_browser_structure
+                cfg = load_config()
+                cdp_endpoint = (cfg.get("common") or {}).get("cdp_endpoint") or "http://localhost:9222"
+                dump_browser_structure(cdp_endpoint, reason="manual")
+            except Exception as e:
+                bridge.emit_log(f"❌ 网页结构诊断失败: {e}", "error")
+        threading.Thread(target=_worker, daemon=True).start()
+        return {"ok": True, "message": "正在生成网页结构诊断"}
 
     # ═══ 搭建控制 ═══
 
@@ -339,6 +352,29 @@ class Api:
         clear_progress()
         return {"ok": True}
 
+    # ═══ 搭建详情 ═══
+
+    def get_build_details(self, date: str = "") -> dict:
+        """获取搭建详情"""
+        try:
+            from backend.services.build_detail_service import get_details_by_date, get_all_details
+            if date:
+                details = get_details_by_date(date)
+            else:
+                details = get_all_details()
+            return {"ok": True, "details": details}
+        except Exception as e:
+            return {"ok": False, "error": str(e), "details": []}
+
+    def export_build_csv(self, date: str = "") -> dict:
+        """导出搭建详情 CSV"""
+        try:
+            from backend.services.build_detail_service import export_csv
+            csv_text = export_csv(date)
+            return {"ok": True, "csv": csv_text}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     # ═══ 每日任务 ═══
 
     def get_daily_tasks(self, date: str) -> dict:
@@ -412,3 +448,193 @@ class Api:
             return {"ok": True, "tasks": all_tasks}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    # ═══ 配置备份 ═══
+
+    def list_config_backups(self) -> dict:
+        """列出所有配置备份文件"""
+        try:
+            import re
+            backup_dir = CONFIG_FILE.parent / "config_backups"
+            if not backup_dir.exists():
+                return {"ok": True, "backups": []}
+            files = sorted(backup_dir.glob("config_*.json"), reverse=True)
+            backups = []
+            for f in files:
+                size_kb = round(f.stat().st_size / 1024, 1)
+                # 从文件名解析时间戳: config_YYYYMMDD_HHMMSS.json
+                m = re.search(r'config_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})\.json$', f.name)
+                if m:
+                    timestamp = f"{m.group(1)}-{m.group(2)}-{m.group(3)} {m.group(4)}:{m.group(5)}:{m.group(6)}"
+                else:
+                    timestamp = f.name
+                backups.append({
+                    "filename": f.name,
+                    "timestamp": timestamp,
+                    "size_kb": size_kb,
+                })
+            return {"ok": True, "backups": backups}
+        except Exception as e:
+            return {"ok": False, "error": str(e), "backups": []}
+
+    def restore_config_backup(self, filename: str) -> dict:
+        """从备份恢复配置"""
+        try:
+            import json
+            # 安全检查
+            if '..' in filename or '/' in filename or '\\' in filename:
+                return {"ok": False, "error": "非法文件名"}
+            if not filename.endswith('.json'):
+                return {"ok": False, "error": "文件名必须以 .json 结尾"}
+            backup_dir = CONFIG_FILE.parent / "config_backups"
+            backup_path = backup_dir / filename
+            if not backup_path.exists():
+                return {"ok": False, "error": "备份文件不存在"}
+            # 读取并验证 JSON
+            content = backup_path.read_text(encoding='utf-8')
+            cfg = json.loads(content)
+            # 用 save_config 保存（会自动创建新备份）
+            save_config(cfg)
+            return {"ok": True}
+        except json.JSONDecodeError:
+            return {"ok": False, "error": "备份文件 JSON 格式无效"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def delete_config_backup(self, filename: str) -> dict:
+        """删除一个备份"""
+        try:
+            # 安全检查
+            if '..' in filename or '/' in filename or '\\' in filename:
+                return {"ok": False, "error": "非法文件名"}
+            if not filename.endswith('.json'):
+                return {"ok": False, "error": "文件名必须以 .json 结尾"}
+            backup_dir = CONFIG_FILE.parent / "config_backups"
+            backup_path = backup_dir / filename
+            if backup_path.exists():
+                backup_path.unlink()
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    # ═══ 账户池 ═══
+
+    def get_account_pool(self, account_type: str = "", keyword: str = "", tag: str = "",
+                         platform: str = "", strategy: str = "", status: str = "",
+                         page=1, page_size=50, pool: str = "normal") -> dict:
+        """查询账户池"""
+        try:
+            from backend.services.account_pool import get_accounts, get_stats, get_all_tags
+            page = int(page) if page else 1
+            page_size = int(page_size) if page_size else 50
+            offset = (page - 1) * page_size
+            result = get_accounts(account_type, keyword, tag, platform, strategy, status,
+                                  limit=page_size, offset=offset, pool=pool)
+            stats = get_stats(pool=pool)
+            tags = get_all_tags(pool=pool)
+            return {"ok": True, "items": result["items"], "total": result["total"], "stats": stats, "tags": tags}
+        except Exception as e:
+            return {"ok": False, "error": str(e), "items": [], "total": 0, "stats": {}, "tags": []}
+
+    def add_pool_account(self, account_id: str, account_type: str, name: str = "", tags: list = None, remark: str = "",
+                         group_name: str = "", status: str = "", strategy: str = "", platform: str = "",
+                         pool: str = "normal") -> dict:
+        """添加单个账户到账户池"""
+        try:
+            from backend.services.account_pool import add_account
+            return add_account(account_id, account_type, name, tags or [], remark, group_name, status, strategy, platform, pool=pool)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def add_pool_accounts_batch(self, accounts: list, pool: str = "normal") -> dict:
+        """批量添加账户到账户池"""
+        try:
+            from backend.services.account_pool import add_accounts_batch
+            return add_accounts_batch(accounts, pool=pool)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def parse_and_import_accounts(self, raw_text: str, account_type: str = "media", extra_tags: list = None,
+                                  pool: str = "normal") -> dict:
+        """解析粘贴的多列文本并批量导入账户池"""
+        try:
+            from backend.services.account_pool import parse_batch_text, add_accounts_batch
+            items = parse_batch_text(raw_text)
+            for item in items:
+                item["type"] = account_type
+                if extra_tags:
+                    item["tags"] = extra_tags
+            return add_accounts_batch(items, pool=pool)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def update_pool_account(self, row_id: str, data: dict, pool: str = "normal") -> dict:
+        """更新账户池中的账户"""
+        try:
+            from backend.services.account_pool import update_account
+            return update_account(row_id, data, pool=pool)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def delete_pool_accounts(self, row_ids: list, pool: str = "normal") -> dict:
+        """删除账户池中的账户"""
+        try:
+            from backend.services.account_pool import delete_accounts
+            return delete_accounts(row_ids, pool=pool)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def import_config_to_pool(self, pool: str = "normal") -> dict:
+        """从当前 config.json 导入账户到池"""
+        try:
+            from backend.services.account_pool import import_from_config
+            cfg = load_config()
+            return import_from_config(cfg, pool=pool)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def select_pool_accounts(self, profile_key: str, num_groups: int = 1, group_size: int = 5) -> dict:
+        """从账户池按轮转逻辑选取账户，选取后自动更新 last_used 实现顺序轮转"""
+        try:
+            from backend.services.account_pool import get_next_accounts, touch_accounts
+            result = get_next_accounts(profile_key, int(num_groups), int(group_size))
+            # 选取成功后，更新 last_used 使下次轮转跳过这些账户
+            if result.get("ok") and result.get("groups"):
+                all_selected = [aid for g in result["groups"] for aid in g]
+                if all_selected:
+                    _pool = "incentive" if "激励" in profile_key else "normal"
+                    touch_accounts(all_selected, "media", pool=_pool)
+            return result
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    # ═══ 分配日志 ═══
+
+    def get_assign_logs(self, date: str = "", profile_key: str = "") -> dict:
+        """查询账户分配日志"""
+        try:
+            from backend.services.assign_log_service import get_assign_logs
+            from backend.services.account_pool import get_usage_counts, get_accounts
+            logs = get_assign_logs(date, profile_key)
+            usage_counts = get_usage_counts()
+            all_media = get_accounts(account_type="media", limit=10000)
+            account_map = {
+                item["account_id"]: {
+                    "name": item.get("name", ""),
+                    "platform": item.get("platform", ""),
+                    "strategy": item.get("strategy", ""),
+                }
+                for item in all_media.get("items", [])
+            }
+            return {"ok": True, "logs": logs, "usage_counts": usage_counts, "account_map": account_map}
+        except Exception as e:
+            return {"ok": False, "error": str(e), "logs": []}
+
+    def get_assign_log_dates(self) -> dict:
+        """获取有分配日志的日期列表"""
+        try:
+            from backend.services.assign_log_service import get_assign_log_dates
+            dates = get_assign_log_dates()
+            return {"ok": True, "dates": dates}
+        except Exception as e:
+            return {"ok": False, "error": str(e), "dates": []}
